@@ -79,7 +79,7 @@ Restart Claude Code, then:
 
 ## CLAUDE.md Integration
 
-Add these rules to your project's `CLAUDE.md` (or `~/.claude/CLAUDE.md` for global use) so Claude Code automatically uses memory across sessions:
+Add these rules to your project's `CLAUDE.md` (or `~/.claude/CLAUDE.md` for global use) so Claude Code proactively uses memory tools throughout the session:
 
 ```markdown
 # MCP Servers
@@ -87,11 +87,11 @@ Add these rules to your project's `CLAUDE.md` (or `~/.claude/CLAUDE.md` for glob
 - **mem0**: Persistent memory across sessions. At the start of each session, `search_memories` for relevant context before asking the user to re-explain anything. Use `add_memory` whenever you discover project architecture, coding conventions, debugging insights, key decisions, or user preferences. Use `update_memory` when prior context changes. Save information like: "This project uses PostgreSQL with Prisma", "Tests run with pytest -v", "Auth uses JWT validated in middleware". When in doubt, save it — future sessions benefit from over-remembering.
 ```
 
-This gives Claude Code persistent memory across sessions. Instead of re-exploring the codebase every time, it retrieves what it already knows and starts productive work immediately.
+This gives Claude Code behavioral instructions to actively search and save memories during the session. For best results, combine with [Claude Code Hooks](#claude-code-hooks) — the CLAUDE.md rules tell Claude *how to use* memory tools mid-session, while hooks handle the *automatic* injection and saving at session boundaries.
 
 ## Claude Code Hooks
 
-Session hooks give Claude Code **automatic** cross-session memory — no CLAUDE.md rules needed. Memories are injected at session start and saved at session end, without any manual tool calls.
+Session hooks automate memory at session boundaries — injecting memories on startup and saving summaries on exit. This happens automatically without manual tool calls.
 
 | Hook | Event | What it does |
 |------|-------|--------------|
@@ -129,6 +129,19 @@ This adds the hook entries to `.claude/settings.json`. The installer is idempote
 | `mem0-hook-context` | `hooks:context_main` | SessionStart hook |
 | `mem0-hook-stop` | `hooks:stop_main` | Stop hook |
 | `mem0-install-hooks` | `hooks:install_main` | CLI installer |
+
+### Hooks + CLAUDE.md
+
+Hooks and CLAUDE.md are complementary layers that work best together:
+
+| Layer | Role | When |
+|-------|------|------|
+| **Hooks** | Automated data flow — injects stored memories on startup, saves session summaries on exit | Session boundaries (start/stop) |
+| **CLAUDE.md** | Behavioral instructions — tells Claude to actively search and save memories during the session | Throughout the session |
+
+Hooks alone give you passive recall (memories appear at startup) and passive saving (summaries saved at exit). CLAUDE.md instructions add active mid-session behavior — Claude searches for relevant memories when encountering new topics, and saves important discoveries immediately rather than waiting for session end.
+
+For the best experience, use both. Hooks ensure memories flow in and out automatically at session boundaries, while CLAUDE.md ensures Claude actively engages with memory tools during the session.
 
 ## Authentication
 
