@@ -194,6 +194,8 @@ def call_with_graph(
     IMPORTANT: The lock is held for the full duration of func() (2-20s),
     because Memory.add() blocks on concurrent.futures.wait() internally.
     """
+    if memory is None:
+        raise RuntimeError("Memory not initialized. Infrastructure may be unavailable.")
     effective = enable_graph if enable_graph is not None else default_graph
     with _graph_lock:
         memory.enable_graph = effective and memory.graph is not None

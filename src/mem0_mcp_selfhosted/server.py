@@ -1,6 +1,8 @@
 """FastMCP server for mem0-mcp-selfhosted.
 
-Orchestrates: provider registration → Memory init → tool registration → transport.
+Orchestrates: tool registration → transport → lazy Memory init on first call.
+Memory initialization is deferred to the first tool invocation via _ensure_memory(),
+allowing the server to respond to MCP initialize/tools/list without live infrastructure.
 All 11 MCP tools + memory_assistant prompt.
 """
 
@@ -8,7 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
+import threading
+import time
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
@@ -34,6 +37,11 @@ logger = logging.getLogger(__name__)
 memory = None
 mcp: FastMCP | None = None
 _enable_graph_default = False
+
+# --- Lazy init state ---
+_memory_init_lock = threading.Lock()
+_last_init_failure: float = 0.0
+_INIT_RETRY_COOLDOWN = 30.0  # seconds before retrying after a failed init
 
 
 def register_providers(providers_info: list[ProviderInfo]) -> None:
@@ -106,6 +114,38 @@ def _init_memory() -> Any:
     return memory
 
 
+def _ensure_memory() -> Any:
+    """Lazy-initialize Memory on first tool call. Thread-safe with retry-after-delay.
+
+    Returns the Memory instance, or None if initialization failed.
+    After a failure, waits ``_INIT_RETRY_COOLDOWN`` seconds before retrying.
+    Matches the lazy-init pattern used by ``graph_tools._get_driver()``.
+    """
+    global memory, _last_init_failure
+
+    if memory is not None:
+        return memory
+
+    now = time.monotonic()
+    if _last_init_failure and (now - _last_init_failure < _INIT_RETRY_COOLDOWN):
+        return None  # Too soon to retry
+
+    with _memory_init_lock:
+        # Double-check after acquiring lock
+        if memory is not None:
+            return memory
+
+        try:
+            _init_memory()
+            logger.info("mem0ai Memory initialized successfully (lazy)")
+        except Exception as exc:
+            _last_init_failure = time.monotonic()
+            logger.error("Lazy Memory init failed: %s", exc)
+            return None
+
+    return memory
+
+
 def _create_server() -> FastMCP:
     """Create and configure the FastMCP server with all tools and prompts."""
     global mcp
@@ -173,10 +213,12 @@ def _register_tools(mcp: FastMCP) -> None:
         if infer is not None:
             kwargs["infer"] = infer
 
-        def _do_add():
-            return memory.add(msgs, **kwargs)
+        mem = _ensure_memory()
 
-        return _mem0_call(call_with_graph, memory, enable_graph, _enable_graph_default, _do_add)
+        def _do_add():
+            return mem.add(msgs, **kwargs)
+
+        return _mem0_call(call_with_graph, mem, enable_graph, _enable_graph_default, _do_add)
 
     @mcp.tool()
     def search_memories(
@@ -207,10 +249,12 @@ def _register_tools(mcp: FastMCP) -> None:
         if rerank is not None:
             kwargs["rerank"] = rerank
 
-        def _do_search():
-            return memory.search(**kwargs)
+        mem = _ensure_memory()
 
-        return _mem0_call(call_with_graph, memory, enable_graph, _enable_graph_default, _do_search)
+        def _do_search():
+            return mem.search(**kwargs)
+
+        return _mem0_call(call_with_graph, mem, enable_graph, _enable_graph_default, _do_search)
 
     @mcp.tool()
     def get_memories(
@@ -230,14 +274,20 @@ def _register_tools(mcp: FastMCP) -> None:
         if limit is not None:
             kwargs["limit"] = limit
 
-        return _mem0_call(memory.get_all, **kwargs)
+        mem = _ensure_memory()
+        if mem is None:
+            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+        return _mem0_call(mem.get_all, **kwargs)
 
     @mcp.tool()
     def get_memory(
         memory_id: Annotated[str, Field(description="Exact memory UUID to fetch.")],
     ) -> str:
         """Fetch a single memory by its ID."""
-        return _mem0_call(memory.get, memory_id)
+        mem = _ensure_memory()
+        if mem is None:
+            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+        return _mem0_call(mem.get, memory_id)
 
     @mcp.tool()
     def update_memory(
@@ -245,8 +295,12 @@ def _register_tools(mcp: FastMCP) -> None:
         text: Annotated[str, Field(description="Replacement text for the memory.")],
     ) -> str:
         """Overwrite an existing memory's text. Re-embeds and re-indexes."""
+        mem = _ensure_memory()
+        if mem is None:
+            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+
         def _do_update():
-            memory.update(memory_id, data=text)
+            mem.update(memory_id, data=text)
             return {"message": "Memory updated successfully!"}
 
         return _mem0_call(_do_update)
@@ -256,8 +310,12 @@ def _register_tools(mcp: FastMCP) -> None:
         memory_id: Annotated[str, Field(description="Exact memory UUID to delete.")],
     ) -> str:
         """Delete a single memory."""
+        mem = _ensure_memory()
+        if mem is None:
+            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+
         def _do_delete():
-            memory.delete(memory_id)
+            mem.delete(memory_id)
             return {"message": "Memory deleted successfully!"}
 
         return _mem0_call(_do_delete)
@@ -287,8 +345,12 @@ def _register_tools(mcp: FastMCP) -> None:
         if run_id:
             filters["run_id"] = run_id
 
+        mem = _ensure_memory()
+        if mem is None:
+            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+
         def _do_bulk_delete():
-            count = safe_bulk_delete(memory, filters, graph_enabled=_enable_graph_default)
+            count = safe_bulk_delete(mem, filters, graph_enabled=_enable_graph_default)
             return {"message": f"Deleted {count} memories.", "count": count}
 
         return _mem0_call(_do_bulk_delete)
@@ -304,8 +366,12 @@ def _register_tools(mcp: FastMCP) -> None:
         Uses Qdrant Facet API (v1.12+) for server-side aggregation,
         with scroll+dedupe fallback for older versions.
         """
+        mem = _ensure_memory()
+        if mem is None:
+            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+
         def _do_list():
-            return list_entities_facet(memory)
+            return list_entities_facet(mem)
 
         return _mem0_call(_do_list)
 
@@ -333,8 +399,12 @@ def _register_tools(mcp: FastMCP) -> None:
         if run_id:
             filters["run_id"] = run_id
 
+        mem = _ensure_memory()
+        if mem is None:
+            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+
         def _do_delete_entity():
-            count = safe_bulk_delete(memory, filters, graph_enabled=_enable_graph_default)
+            count = safe_bulk_delete(mem, filters, graph_enabled=_enable_graph_default)
             return {"message": f"Entity deleted. Removed {count} memories.", "count": count}
 
         return _mem0_call(_do_delete_entity)
@@ -392,7 +462,12 @@ def _register_prompts(mcp: FastMCP) -> None:
 
 
 def run_server() -> None:
-    """Entry point: initialize Memory, create server, and run."""
+    """Entry point: create server and run.
+
+    Memory initialization is deferred to the first tool call via
+    ``_ensure_memory()``, allowing the server to respond to MCP
+    ``initialize`` and ``tools/list`` without live infrastructure.
+    """
     # Configure logging
     log_level = env("MEM0_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
@@ -403,16 +478,7 @@ def run_server() -> None:
     # Load .env file
     load_dotenv()
 
-    # Initialize Memory
-    try:
-        _init_memory()
-        logger.info("mem0ai Memory initialized successfully")
-    except Exception as exc:
-        logger.error("Failed to initialize Memory: %s", exc)
-        logger.error("Memory is required for all tools. Exiting.")
-        sys.exit(1)
-
-    # Create and run server
+    # Create and run server (Memory init deferred to first tool call)
     server = _create_server()
     transport = env("MEM0_TRANSPORT", "stdio").lower()
 

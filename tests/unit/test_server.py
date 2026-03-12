@@ -381,3 +381,134 @@ class TestCreateServer:
         srv = server_mod._create_server()
         prompts = srv._prompt_manager._prompts
         assert "memory_assistant" in prompts
+
+    def test_tools_register_without_memory(self):
+        """Server creates tools even when memory is None (lazy init)."""
+        original = server_mod.memory
+        server_mod.memory = None
+        try:
+            srv = server_mod._create_server()
+            tools = srv._tool_manager._tools
+            assert len(tools) == 11
+        finally:
+            server_mod.memory = original
+
+
+# ============================================================
+# 4. Lazy Memory Initialization Tests
+# ============================================================
+
+
+class TestEnsureMemory:
+    @pytest.fixture(autouse=True)
+    def _reset_lazy_state(self):
+        """Reset lazy init state before each test."""
+        original_memory = server_mod.memory
+        original_failure = server_mod._last_init_failure
+        server_mod.memory = None
+        server_mod._last_init_failure = 0.0
+        yield
+        server_mod.memory = original_memory
+        server_mod._last_init_failure = original_failure
+
+    @patch("mem0_mcp_selfhosted.server._init_memory")
+    def test_lazy_init_on_first_call(self, mock_init):
+        """_ensure_memory() triggers _init_memory() on first call."""
+        mock_mem = MagicMock()
+        mock_mem.graph = None
+
+        def set_memory():
+            server_mod.memory = mock_mem
+
+        mock_init.side_effect = set_memory
+        result = server_mod._ensure_memory()
+        mock_init.assert_called_once()
+        assert result is mock_mem
+
+    def test_returns_cached_memory(self, mock_memory):
+        """_ensure_memory() returns cached memory without re-init."""
+        server_mod.memory = mock_memory
+        result = server_mod._ensure_memory()
+        assert result is mock_memory
+
+    @patch("mem0_mcp_selfhosted.server._init_memory")
+    def test_returns_none_on_failure(self, mock_init):
+        """_ensure_memory() returns None when init fails."""
+        mock_init.side_effect = ConnectionError("Qdrant unreachable")
+        result = server_mod._ensure_memory()
+        assert result is None
+        mock_init.assert_called_once()
+
+    @patch("mem0_mcp_selfhosted.server._init_memory")
+    def test_no_retry_during_cooldown(self, mock_init):
+        """_ensure_memory() skips retry within cooldown period."""
+        mock_init.side_effect = ConnectionError("Qdrant unreachable")
+        # First call fails
+        server_mod._ensure_memory()
+        mock_init.reset_mock()
+        # Second call within cooldown — should NOT retry
+        result = server_mod._ensure_memory()
+        assert result is None
+        mock_init.assert_not_called()
+
+    @patch("mem0_mcp_selfhosted.server._init_memory")
+    @patch("mem0_mcp_selfhosted.server.time")
+    def test_retries_after_cooldown(self, mock_time, mock_init):
+        """_ensure_memory() retries after cooldown expires."""
+        mock_init.side_effect = ConnectionError("Qdrant unreachable")
+        mock_time.monotonic.return_value = 100.0
+        # First call fails at t=100
+        server_mod._ensure_memory()
+        mock_init.reset_mock()
+        # Second call at t=131 (past 30s cooldown)
+        mock_time.monotonic.return_value = 131.0
+        mock_init.side_effect = ConnectionError("still down")
+        server_mod._ensure_memory()
+        mock_init.assert_called_once()
+
+
+class TestToolsWithNoMemory:
+    """Test that tools return structured errors when memory is unavailable."""
+
+    @pytest.fixture(autouse=True)
+    def _no_memory(self):
+        """Ensure memory is None and lazy init fails."""
+        original = server_mod.memory
+        original_failure = server_mod._last_init_failure
+        server_mod.memory = None
+        server_mod._last_init_failure = 0.0
+        yield
+        server_mod.memory = original
+        server_mod._last_init_failure = original_failure
+
+    @patch("mem0_mcp_selfhosted.server._init_memory", side_effect=ConnectionError("no qdrant"))
+    def test_add_memory_returns_error(self, mock_init):
+        srv = server_mod._create_server()
+        fn = _get_tool_fn(srv, "add_memory")
+        result = fn(text="test")
+        parsed = json.loads(result)
+        assert "error" in parsed
+
+    @patch("mem0_mcp_selfhosted.server._init_memory", side_effect=ConnectionError("no qdrant"))
+    def test_search_memories_returns_error(self, mock_init):
+        srv = server_mod._create_server()
+        fn = _get_tool_fn(srv, "search_memories")
+        result = fn(query="test")
+        parsed = json.loads(result)
+        assert "error" in parsed
+
+    @patch("mem0_mcp_selfhosted.server._init_memory", side_effect=ConnectionError("no qdrant"))
+    def test_get_memories_returns_error(self, mock_init):
+        srv = server_mod._create_server()
+        fn = _get_tool_fn(srv, "get_memories")
+        result = fn()
+        parsed = json.loads(result)
+        assert parsed["error"] == "Memory not initialized"
+
+    @patch("mem0_mcp_selfhosted.server._init_memory", side_effect=ConnectionError("no qdrant"))
+    def test_get_memory_returns_error(self, mock_init):
+        srv = server_mod._create_server()
+        fn = _get_tool_fn(srv, "get_memory")
+        result = fn(memory_id="uuid-123")
+        parsed = json.loads(result)
+        assert parsed["error"] == "Memory not initialized"

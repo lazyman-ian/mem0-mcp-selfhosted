@@ -107,6 +107,11 @@ class TestCallWithGraph:
         result = call_with_graph(memory, True, True, _check)
         assert result == "ok"
 
+    def test_none_memory_raises_runtime_error(self):
+        """call_with_graph raises RuntimeError when memory is None."""
+        with pytest.raises(RuntimeError, match="Memory not initialized"):
+            call_with_graph(None, False, False, lambda: "ok")
+
 
 class TestSafeBulkDelete:
     def test_iterates_and_deletes(self):
