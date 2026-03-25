@@ -17,6 +17,7 @@ dependencies = [
     "anthropic>=0.77.0",
     "neo4j>=5.23.1",
     "langchain-neo4j>=0.3.0",
+    "rank-bm25>=0.2.2",
     "python-dotenv>=1.2.1",
 ]
 
