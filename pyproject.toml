@@ -16,6 +16,7 @@ dependencies = [
     "mem0ai[llms]>=1.0.3",
     "anthropic>=0.77.0",
     "neo4j>=5.23.1",
+    "langchain-neo4j>=0.3.0",
     "python-dotenv>=1.2.1",
 ]
 
