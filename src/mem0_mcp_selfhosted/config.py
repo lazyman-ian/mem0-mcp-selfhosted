@@ -45,7 +45,7 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
 
     # --- Top-level provider default (cascades to LLM and graph LLM) ---
     _provider_default = env("MEM0_PROVIDER", "anthropic")
-    _supported_llm_providers = ("anthropic", "ollama")
+    _supported_llm_providers = ("anthropic", "ollama", "openai")
     if _provider_default not in _supported_llm_providers:
         raise ValueError(
             f"Unsupported MEM0_PROVIDER={_provider_default!r}. "
@@ -60,7 +60,7 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
             f"Supported: {list(_supported_llm_providers)}"
         )
 
-    _llm_model_defaults = {"anthropic": "claude-opus-4-6", "ollama": "qwen3:14b"}
+    _llm_model_defaults = {"anthropic": "claude-opus-4-6", "ollama": "qwen3:14b", "openai": "gpt-4o"}
     llm_model = env("MEM0_LLM_MODEL", _llm_model_defaults[llm_provider])
     llm_max_tokens = int(env("MEM0_LLM_MAX_TOKENS", "16384"))
 
@@ -71,6 +71,13 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
             llm_config["api_key"] = token
     elif llm_provider == "ollama":
         llm_config["ollama_base_url"] = _resolve_ollama_url("MEM0_LLM_URL")
+    elif llm_provider == "openai":
+        openai_api_key = opt_env("MEM0_OPENAI_API_KEY") or opt_env("OPENAI_API_KEY")
+        openai_base_url = opt_env("MEM0_OPENAI_BASE_URL") or opt_env("OPENAI_BASE_URL")
+        if openai_api_key:
+            llm_config["api_key"] = openai_api_key
+        if openai_base_url:
+            llm_config["openai_base_url"] = openai_base_url
 
     # --- Embedder ---
     embed_provider = env("MEM0_EMBED_PROVIDER", "ollama")
@@ -192,6 +199,13 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
             google_api_key = opt_env("GOOGLE_API_KEY")
             if google_api_key:
                 graph_llm_config["api_key"] = google_api_key
+        elif graph_llm_provider == "openai":
+            openai_api_key = opt_env("MEM0_OPENAI_API_KEY") or opt_env("OPENAI_API_KEY")
+            openai_base_url = opt_env("MEM0_OPENAI_BASE_URL") or opt_env("OPENAI_BASE_URL")
+            if openai_api_key:
+                graph_llm_config["api_key"] = openai_api_key
+            if openai_base_url:
+                graph_llm_config["openai_base_url"] = openai_base_url
         elif graph_llm_provider == "gemini_split":
             # Split-model router: Gemini for extraction, separate LLM for contradiction.
             # Use "gemini" as config provider (passes pydantic validation), then
