@@ -13,7 +13,7 @@ import logging
 import re
 import time
 
-from mem0_mcp_selfhosted.env import env
+from mem0_mcp_selfhosted.env import bool_env, env
 from typing import Any
 
 import anthropic
@@ -411,6 +411,10 @@ class AnthropicOATLLM(LLMBase):
             params["temperature"] = self.config.temperature
         if system_parts:
             params["system"] = "\n\n".join(system_parts)
+        # Disable thinking for models that enable it by default (e.g., DashScope qwen3.5-plus).
+        # mem0 infer/graph calls don't benefit from reasoning chains.
+        if bool_env("MEM0_DISABLE_THINKING"):
+            params["thinking"] = {"type": "disabled"}
 
         # Path 2: Tool calling
         if tools:
