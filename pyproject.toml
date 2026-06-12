@@ -13,7 +13,9 @@ authors = [
 ]
 dependencies = [
     "mcp[cli]>=1.23.0",
-    "mem0ai[llms]>=2.0,<3",
+    # nlp extra (spaCy) is required: entity linking — the 2.x replacement for
+    # graph memory — silently no-ops without it (extract_entities returns []).
+    "mem0ai[llms,nlp]>=2.0,<3",
     "anthropic>=0.77.0",
     "neo4j>=5.23.1",
     "python-dotenv>=1.2.1",
