@@ -1,6 +1,43 @@
 # CHANGELOG
 
 
+## v0.4.0 (2026-06-12)
+
+### Breaking Changes
+
+- Requires `mem0ai >= 2.0,<3` (was `>= 1.0.3`). Old Qdrant collections remain
+  compatible; no data migration needed for vector memories.
+- Graph memory write path removed: mem0ai 2.0 dropped graph memory from OSS
+  (`graph_store` config, Neo4j writes, `Memory.graph`). Built-in entity
+  linking replaces it — `add()` automatically extracts entities into a
+  parallel `{collection}_entities` Qdrant collection.
+- `MEM0_ENABLE_GRAPH` and all `MEM0_GRAPH_*` env vars are deprecated no-ops
+  (a warning is logged when they are set). `MEM0_NEO4J_URL/USER/PASSWORD/DATABASE`
+  remain in use by the legacy read-only graph tools.
+- `enable_graph` tool parameter on `add_memory`/`search_memories` is kept for
+  caller compatibility but ignored.
+- `search_memories`/`get_memories` now call the 2.x `filters`-based
+  `Memory.search()`/`get_all()` signatures (entity ids inside `filters`,
+  `top_k` instead of `limit`). mem0ai defaults changed upstream:
+  top_k 100→20, threshold None→0.1.
+- Removed `llm_router.py` (`gemini_split` split-model graph router),
+  `patch_graph_sanitizer()`, `patch_gemini_parse_response()`, and
+  `call_with_graph()` — all served the removed graph pipeline.
+- Anthropic structured-output schemas replaced: the 1.x fact-retrieval /
+  memory-update schema pair became a single additive-extraction schema
+  matching the 2.x `{"memory": [...]}` response contract.
+- Dropped `langchain-neo4j` and `rank-bm25` dependencies and the `[graph]`
+  extra. `neo4j` driver stays for the legacy read tools.
+- Removed `benchmarks/` graph-LLM battle scripts — they benchmarked the
+  removed graph pipeline (kept in git history).
+
+### Features
+
+- `mcp_search_graph`/`mcp_get_entity` retained as legacy read-only tools for
+  historical Neo4j data; they degrade to a structured `graph_unavailable`
+  error when Neo4j is unreachable.
+
+
 ## v0.3.2 (2026-03-13)
 
 ### Bug Fixes

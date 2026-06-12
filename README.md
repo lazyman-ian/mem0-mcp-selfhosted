@@ -2,7 +2,7 @@
 
 <a href="https://glama.ai/mcp/servers/elvismdev/mem0-mcp-selfhosted"><img width="380" height="200" src="https://glama.ai/mcp/servers/elvismdev/mem0-mcp-selfhosted/badge?v=1" alt="mem0-mcp-selfhosted MCP server" /></a>
 
-Self-hosted [mem0](https://github.com/mem0ai/mem0) MCP server for Claude Code. Run a complete memory server against self-hosted Qdrant + Neo4j + Ollama, with your choice of Anthropic (Claude) or Ollama as the main LLM.
+Self-hosted [mem0](https://github.com/mem0ai/mem0) MCP server for Claude Code. Run a complete memory server against self-hosted Qdrant + Ollama, with your choice of Anthropic (Claude) or Ollama as the main LLM. Requires `mem0ai >= 2.0`.
 
 Uses the `mem0ai` package directly as a library, supports both Claude's OAT token and fully local Ollama setups, and exposes 11 MCP tools for full memory management.
 
@@ -12,8 +12,7 @@ Uses the `mem0ai` package directly as a library, supports both Claude's OAT toke
 |---------|----------|---------|
 | **Qdrant** | Yes | Vector memory storage and search |
 | **Ollama** | Yes | Embedding generation (`bge-m3`) and optionally local LLM |
-| **Neo4j 5+** | Optional | Knowledge graph (entity relationships) |
-| **Google API Key** | Optional | Required only for `gemini`/`gemini_split` graph providers |
+| **Neo4j 5+** | Optional | Legacy only: read historical graph data written by mem0ai 1.x |
 
 Python >= 3.10 and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
@@ -49,7 +48,7 @@ claude mcp add --scope user --transport stdio mem0 \
   -- uvx --from git+https://github.com/elvismdev/mem0-mcp-selfhosted.git mem0-mcp-selfhosted
 ```
 
-`MEM0_PROVIDER=ollama` cascades to both the main LLM and graph LLM providers. Same infrastructure defaults apply (Qdrant on `localhost:6333`, `bge-m3` embeddings). Per-service overrides (e.g. `MEM0_LLM_URL`, `MEM0_EMBED_URL`) still work when needed.
+`MEM0_PROVIDER=ollama` switches the main LLM to Ollama. Same infrastructure defaults apply (Qdrant on `localhost:6333`, `bge-m3` embeddings). Per-service overrides (e.g. `MEM0_LLM_URL`, `MEM0_EMBED_URL`) still work when needed.
 
 Or add it to a single project by creating `.mcp.json` in the project root:
 
@@ -76,7 +75,7 @@ Restart Claude Code, then:
 ```
 > Search my memories for TypeScript preferences
 > Remember that I prefer Hatch for Python packaging
-> Show me all entities in my knowledge graph
+> List which users have stored memories
 ```
 
 ## CLAUDE.md Integration
@@ -122,7 +121,7 @@ This adds the hook entries to `.claude/settings.json`. The installer is idempote
 
 **On session start**, the context hook searches mem0 with two queries (project architecture + recent session summaries), deduplicates by memory ID, and formats the results as numbered lines under a `# mem0 Cross-Session Memory` header. These are injected via the hook's `additionalContext` response field.
 
-**On session stop**, the stop hook reads the JSONL transcript, extracts the last 6 user/assistant messages (a sliding window via bounded deque), builds a summary prompt, and calls `memory.add(infer=True)` to extract atomic facts. Graph is force-disabled in hooks to stay within the 15s/30s timeout budgets.
+**On session stop**, the stop hook reads the JSONL transcript, extracts the last 6 user/assistant messages (a sliding window via bounded deque), builds a summary prompt, and calls `memory.add(infer=True)` to extract atomic facts.
 
 ### Entry points
 
@@ -168,8 +167,8 @@ The server resolves an Anthropic token using a prioritized fallback chain:
 
 | Tool | Description |
 |------|-------------|
-| `add_memory` | Store text or conversation history as memories. Supports `enable_graph`, `infer`, `metadata`. |
-| `search_memories` | Semantic search with optional `filters`, `threshold`, `rerank`, `enable_graph`. |
+| `add_memory` | Store text or conversation history as memories. Supports `infer`, `metadata`. Entity linking is built-in (mem0ai >= 2.0). |
+| `search_memories` | Semantic search with optional `filters`, `threshold`, `rerank`. |
 | `get_memories` | List/filter memories (non-search). Supports `limit` and scope filters. |
 | `get_memory` | Fetch a single memory by UUID. |
 | `update_memory` | Replace memory text. Re-embeds and re-indexes in Qdrant. |
@@ -178,11 +177,16 @@ The server resolves an Anthropic token using a prioritized fallback chain:
 | `list_entities` | List users/agents/runs with memory counts. Uses Qdrant Facet API. |
 | `delete_entities` | Cascade-delete an entity and all its memories. |
 
-### Graph Tools
+### Graph Tools (legacy read-only)
+
+mem0ai >= 2.0 removed graph memory from OSS — no new graph data is written.
+These tools remain so a historical Neo4j graph written by mem0ai 1.x stays
+readable. They return a structured `graph_unavailable` error when Neo4j is
+unreachable.
 
 | Tool | Description |
 |------|-------------|
-| `search_graph` | Search Neo4j entities by name substring. Returns entities + outgoing relationships. |
+| `search_graph` | Search legacy Neo4j entities by name substring. Returns entities + outgoing relationships. |
 | `get_entity` | Get all relationships for an entity (bidirectional: incoming + outgoing). |
 
 ### Prompt
@@ -194,7 +198,7 @@ The server registers a `memory_assistant` MCP prompt that provides Claude with a
 All tools use Pydantic `Annotated[type, Field(description=...)]` for self-documenting parameter schemas. Common patterns:
 
 - **`user_id`** defaults to `MEM0_USER_ID` env var when not provided
-- **`enable_graph`** overrides the default `MEM0_ENABLE_GRAPH` per-call
+- **`enable_graph`** is deprecated and ignored (kept for caller compatibility) — entity linking is always on
 - **`filters`** supports structured operators: `{"key": {"eq": "value"}}`, `{"AND": [...]}`
 - All responses are JSON strings via `json.dumps(result, ensure_ascii=False)`
 
@@ -215,19 +219,13 @@ All configuration is via environment variables. Create a `.env` file or set them
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEM0_PROVIDER` | `anthropic` | Top-level provider (`anthropic` or `ollama`). Cascades to `MEM0_LLM_PROVIDER` and `MEM0_GRAPH_LLM_PROVIDER` when those are not set. Does **not** affect `MEM0_EMBED_PROVIDER`. |
-| `MEM0_LLM_PROVIDER` | _(MEM0_PROVIDER)_ | Main LLM provider: `anthropic` or `ollama`. Inherits from `MEM0_PROVIDER` when not set. |
-| `MEM0_OLLAMA_URL` | `http://localhost:11434` | Shared Ollama base URL. Cascades to `MEM0_LLM_URL`, `MEM0_EMBED_URL`, and `MEM0_GRAPH_LLM_URL` when those are not set. |
+| `MEM0_PROVIDER` | `anthropic` | Top-level provider (`anthropic`, `ollama`, or `openai`). Cascades to `MEM0_LLM_PROVIDER` when not set. Does **not** affect `MEM0_EMBED_PROVIDER`. |
+| `MEM0_LLM_PROVIDER` | _(MEM0_PROVIDER)_ | Main LLM provider: `anthropic`, `ollama`, or `openai`. Inherits from `MEM0_PROVIDER` when not set. |
+| `MEM0_OLLAMA_URL` | `http://localhost:11434` | Shared Ollama base URL. Cascades to `MEM0_LLM_URL` and `MEM0_EMBED_URL` when those are not set. |
 | `MEM0_LLM_MODEL` | _(per-provider)_ | Model for the selected LLM provider. Defaults to `claude-opus-4-6` for Anthropic, `qwen3:14b` for Ollama |
 | `MEM0_LLM_URL` | _(cascades)_ | Ollama base URL for the main LLM. Cascades: `MEM0_LLM_URL` → `MEM0_OLLAMA_URL` → `http://localhost:11434`. Only used when `MEM0_LLM_PROVIDER=ollama` |
 | `MEM0_LLM_MAX_TOKENS` | `16384` | Max tokens for LLM responses (Anthropic only) |
-| `MEM0_GRAPH_LLM_PROVIDER` | _(MEM0_PROVIDER)_ | Graph LLM provider (`anthropic`, `anthropic_oat`, `ollama`, `gemini`, `gemini_split`). Inherits from `MEM0_PROVIDER` when not set. |
-| `MEM0_GRAPH_LLM_URL` | _(cascades)_ | Ollama base URL for graph LLM. Cascades: `MEM0_GRAPH_LLM_URL` → `MEM0_LLM_URL` → `MEM0_OLLAMA_URL` → `http://localhost:11434` |
-| `MEM0_GRAPH_LLM_MODEL` | _(varies)_ | Graph model. Inherits `MEM0_LLM_MODEL` for anthropic/ollama; defaults to `gemini-2.5-flash-lite` for gemini/gemini_split |
-| `GOOGLE_API_KEY` | -- | Google API key (required for `gemini`/`gemini_split` graph providers) |
-| `MEM0_GRAPH_CONTRADICTION_LLM_PROVIDER` | `anthropic` | Contradiction LLM provider in `gemini_split` mode (`anthropic`, `anthropic_oat`, `ollama`) |
-| `MEM0_GRAPH_CONTRADICTION_LLM_MODEL` | _(provider-aware)_ | Contradiction model in `gemini_split` mode. Defaults to `claude-opus-4-6` for `anthropic`/`anthropic_oat` providers; inherits `MEM0_LLM_MODEL` for others. |
-| `MEM0_OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model in VRAM between calls (e.g., `1h`, `5m`). Prevents model unload during multi-call graph pipelines |
+| `MEM0_OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model in VRAM between calls (e.g., `1h`, `5m`). Prevents model unload between sequential calls |
 | `MEM0_OLLAMA_THINK` | `false` | Set to `true` to re-enable qwen3 thinking mode (disabled by default to prevent `<think>` + `format:"json"` collision) |
 
 ### Embedder
@@ -249,17 +247,18 @@ All configuration is via environment variables. Create a `.env` file or set them
 | `MEM0_QDRANT_TIMEOUT` | _(client default)_ | Qdrant REST API timeout in seconds (e.g., `30`). Only set if you hit `ReadTimeout` during collection operations |
 | `MEM0_COLLECTION` | `mem0_mcp_selfhosted` | Qdrant collection name |
 
-### Graph Store (Neo4j)
+### Legacy Neo4j (read-only graph tools)
+
+These are read by `search_graph`/`get_entity` only. mem0ai >= 2.0 never
+writes graph data; `MEM0_ENABLE_GRAPH` and the other `MEM0_GRAPH_*` vars
+are deprecated no-ops that log a warning when set.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEM0_ENABLE_GRAPH` | `false` | Enable graph memory (entity extraction to Neo4j) |
 | `MEM0_NEO4J_URL` | `bolt://127.0.0.1:7687` | Neo4j Bolt endpoint |
 | `MEM0_NEO4J_USER` | `neo4j` | Neo4j username |
 | `MEM0_NEO4J_PASSWORD` | `mem0graph` | Neo4j password |
 | `MEM0_NEO4J_DATABASE` | -- | Neo4j database name (multi-database setups) |
-| `MEM0_NEO4J_BASE_LABEL` | -- | Custom Neo4j base label for node type grouping |
-| `MEM0_GRAPH_THRESHOLD` | `0.7` | Embedding similarity threshold for node matching |
 
 ### Server
 
@@ -284,20 +283,19 @@ Claude Code
   │     ├── llm_anthropic.py     ← Custom Anthropic LLM provider (OAT + structured outputs)
   │     ├── llm_ollama.py        ← Custom Ollama LLM provider (restored tool-calling)
   │     ├── config.py            ← Env vars → MemoryConfig dict (provider + URL cascades)
-  │     ├── helpers.py           ← Error wrapper, concurrency lock, safe bulk-delete, monkey-patches
-  │     ├── graph_tools.py       ← Direct Neo4j Cypher queries (lazy driver)
-  │     ├── llm_router.py        ← Split-model graph LLM router (gemini_split)
+  │     ├── helpers.py           ← Error wrapper, safe bulk-delete, entity listing
+  │     ├── graph_tools.py       ← Legacy read-only Neo4j Cypher queries (lazy driver)
   │     ├── __init__.py          ← Telemetry suppression (before any mem0 import)
   │     └── server.py            ← FastMCP orchestrator (11 tools + prompt)
   │           |
-  │           ├── mem0ai Memory class
-  │           │     ├── Vector: LLM fact extraction → Ollama embed → Qdrant
-  │           │     └── Graph: LLM entity extraction (tool calls) → Neo4j
+  │           ├── mem0ai Memory class (>= 2.0)
+  │           │     ├── Vector: LLM additive extraction → Ollama embed → Qdrant
+  │           │     └── Entity linking: spaCy extraction → {collection}_entities (Qdrant)
   │           |
   │           └── Infrastructure
-  │                 ├── Qdrant          ← Vector store
+  │                 ├── Qdrant          ← Vector store + entity store
   │                 ├── Ollama          ← Embeddings
-  │                 ├── Neo4j           ← Knowledge graph (optional)
+  │                 ├── Neo4j           ← Legacy graph (optional, read-only)
   │                 └── Anthropic/Ollama ← Main LLM (configurable)
   |
   └── Session Hooks (subprocess, not MCP)
@@ -308,46 +306,18 @@ Claude Code
               └── install_main()   → CLI to patch .claude/settings.json
 ```
 
-## Graph Memory & Quota
+## Entity Linking (replaces graph memory)
 
-Graph memory is **disabled by default** (`MEM0_ENABLE_GRAPH=false`) to protect your Claude quota. Each `add_memory` with graph enabled triggers 3 additional LLM calls for entity extraction, relationship generation, and conflict resolution.
+mem0ai >= 2.0 removed graph memory from OSS and replaced it with built-in
+entity linking: every `add()` extracts entities (spaCy-based, no extra LLM
+calls) into a parallel Qdrant collection named `{collection}_entities`,
+created automatically. Search fuses semantic similarity, BM25 keyword
+matching, and entity boosting — no configuration needed and no extra
+Claude quota cost.
 
-### Using Ollama for Graph Operations
-
-To eliminate Claude quota usage for graph ops, use a local Ollama model:
-
-```env
-MEM0_ENABLE_GRAPH=true
-MEM0_GRAPH_LLM_PROVIDER=ollama
-MEM0_GRAPH_LLM_MODEL=qwen3:14b
-```
-
-Qwen3:14b has 0.971 tool-calling F1 (nearly matching GPT-4's 0.974) and runs in ~7-8GB VRAM with Q4_K_M quantization.
-
-### Using Gemini for Graph Operations
-
-Google's Gemini 2.5 Flash Lite is the cheapest option for graph ops while maintaining strong entity extraction accuracy:
-
-```env
-MEM0_ENABLE_GRAPH=true
-MEM0_GRAPH_LLM_PROVIDER=gemini
-MEM0_GRAPH_LLM_MODEL=gemini-2.5-flash-lite
-GOOGLE_API_KEY=your-google-api-key
-```
-
-### Using Split-Model for Best Accuracy
-
-The `gemini_split` provider routes graph pipeline calls to different LLMs based on the operation. Entity extraction (Calls 1 & 2) goes to Gemini for speed and cost; contradiction detection (Call 3) goes to Claude for accuracy.
-
-```env
-MEM0_ENABLE_GRAPH=true
-MEM0_GRAPH_LLM_PROVIDER=gemini_split
-GOOGLE_API_KEY=your-google-api-key
-MEM0_GRAPH_CONTRADICTION_LLM_PROVIDER=anthropic
-MEM0_GRAPH_CONTRADICTION_LLM_MODEL=claude-opus-4-6
-```
-
-Benchmark results across 248 test cases: Gemini scores 85.4% on entity extraction (vs Claude's 79.1%), while Claude scores 100% on contradiction detection (vs Gemini's 80%). The split-model combines the best of both.
+The Neo4j graph written by earlier versions of this server is not
+migrated; it stays readable via the legacy `search_graph`/`get_entity`
+tools.
 
 ## Transport Modes
 
@@ -371,7 +341,7 @@ python3 -m pytest tests/unit/ -v
 # Run contract tests (validates mem0ai internal API assumptions)
 python3 -m pytest tests/contract/ -v
 
-# Run integration tests (requires live Qdrant + Neo4j + Ollama)
+# Run integration tests (requires live Qdrant + Ollama)
 python3 -m pytest tests/integration/ -v
 
 # Run all tests
@@ -380,9 +350,9 @@ python3 -m pytest tests/ -v
 
 ### Test Structure
 
-- **`tests/unit/`** -- Pure unit tests with mocked dependencies (env, auth, config, config matrix, concurrency, MCP protocol, helpers, hooks, LLM providers, graph tools, LLM router, server)
-- **`tests/contract/`** -- Validates assumptions about mem0ai internals (schema detection invariant, `vector_store.client` access path, `LlmFactory` registration idempotency)
-- **`tests/integration/`** -- Live infrastructure tests (memory lifecycle, graph ops, bulk operations, hooks) against real Qdrant + Neo4j + Ollama. Marked with `@pytest.mark.integration`.
+- **`tests/unit/`** -- Pure unit tests with mocked dependencies (env, auth, config, config matrix, MCP protocol, helpers, hooks, LLM providers, graph tools, server)
+- **`tests/contract/`** -- Validates assumptions about mem0ai internals (additive extraction call shape, 2.x search/get_all/update signatures, `vector_store.client` access path, `LlmFactory` registration idempotency)
+- **`tests/integration/`** -- Live infrastructure tests (memory lifecycle, bulk operations, hooks) against real Qdrant + Ollama. Marked with `@pytest.mark.integration`.
 
 Contract tests catch breaking changes in `mem0ai` upgrades before they reach production.
 
