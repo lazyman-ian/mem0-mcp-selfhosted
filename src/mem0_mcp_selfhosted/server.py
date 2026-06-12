@@ -19,15 +19,12 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from mem0_mcp_selfhosted.config import ProviderInfo, build_config
-from mem0_mcp_selfhosted.env import bool_env, env
+from mem0_mcp_selfhosted.env import env
 from mem0_mcp_selfhosted.graph_tools import get_entity, search_graph
 from mem0_mcp_selfhosted.helpers import (
     _mem0_call,
-    call_with_graph,
     get_default_user_id,
     list_entities_facet,
-    patch_gemini_parse_response,
-    patch_graph_sanitizer,
     safe_bulk_delete,
 )
 
@@ -36,12 +33,16 @@ logger = logging.getLogger(__name__)
 # --- Globals set during startup ---
 memory = None
 mcp: FastMCP | None = None
-_enable_graph_default = False
 
 # --- Lazy init state ---
 _memory_init_lock = threading.Lock()
 _last_init_failure: float = 0.0
 _INIT_RETRY_COOLDOWN = 30.0  # seconds before retrying after a failed init
+
+_MEMORY_UNAVAILABLE = json.dumps(
+    {"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."},
+    ensure_ascii=False,
+)
 
 
 def register_providers(providers_info: list[ProviderInfo]) -> None:
@@ -88,29 +89,16 @@ def _resolve_config_class(provider_name: str) -> type | None:
 
 def _init_memory() -> Any:
     """Initialize mem0ai Memory with config and registered providers."""
-    global memory, _enable_graph_default
+    global memory
 
-    config_dict, providers_info, split_config = build_config()
+    config_dict, providers_info = build_config()
 
     register_providers(providers_info)
-
-    # Patch mem0ai's relationship sanitizer before Memory init
-    patch_graph_sanitizer()
-    patch_gemini_parse_response()
 
     # Initialize Memory
     from mem0 import Memory
 
     memory = Memory.from_config(config_dict)
-
-    # If split-model was requested, swap the graph LLM with the router
-    if split_config and memory.graph is not None:
-        from mem0_mcp_selfhosted.llm_router import SplitModelGraphLLM, SplitModelGraphLLMConfig
-
-        router_config = SplitModelGraphLLMConfig(**split_config)
-        memory.graph.llm = SplitModelGraphLLM(router_config)
-
-    _enable_graph_default = bool_env("MEM0_ENABLE_GRAPH")
     return memory
 
 
@@ -144,6 +132,37 @@ def _ensure_memory() -> Any:
             return None
 
     return memory
+
+
+def _entity_filters(
+    user_id: str | None,
+    agent_id: str | None,
+    run_id: str | None,
+    extra_filters: dict | None = None,
+) -> dict[str, Any]:
+    """Build the 2.x-style filters dict from entity ids + optional extra clauses.
+
+    mem0ai >= 2.0 rejects top-level user_id/agent_id/run_id kwargs on
+    search()/get_all() — entity ids must live inside the filters dict.
+    """
+    filters: dict[str, Any] = dict(extra_filters) if extra_filters else {}
+    if user_id:
+        filters["user_id"] = user_id
+    if agent_id:
+        filters["agent_id"] = agent_id
+    if run_id:
+        filters["run_id"] = run_id
+    return filters
+
+
+def _warn_enable_graph_deprecated(tool_name: str, enable_graph: bool | None) -> None:
+    """Log when a caller still passes the deprecated enable_graph parameter."""
+    if enable_graph is not None:
+        logger.warning(
+            "%s: enable_graph parameter is deprecated and ignored — mem0ai >= 2.0 "
+            "removed graph memory; built-in entity linking always applies.",
+            tool_name,
+        )
 
 
 def _create_server() -> FastMCP:
@@ -192,9 +211,10 @@ def _register_tools(mcp: FastMCP) -> None:
         run_id: Annotated[str | None, Field(description="Run scope identifier.")] = None,
         metadata: Annotated[dict | None, Field(description="Arbitrary metadata JSON to store alongside the memory.")] = None,
         infer: Annotated[bool | None, Field(description="If true (default), LLM extracts key facts. If false, stores raw text.")] = None,
-        enable_graph: Annotated[bool | None, Field(description="Override default graph toggle for this call.")] = None,
+        enable_graph: Annotated[bool | None, Field(description="Deprecated, ignored. mem0ai >= 2.0 always applies built-in entity linking.")] = None,
     ) -> str:
         """Store a new memory. Requires at least one of user_id, agent_id, or run_id."""
+        _warn_enable_graph_deprecated("add_memory", enable_graph)
         uid = user_id or get_default_user_id()
 
         # Build messages for mem0ai
@@ -214,11 +234,10 @@ def _register_tools(mcp: FastMCP) -> None:
             kwargs["infer"] = infer
 
         mem = _ensure_memory()
+        if mem is None:
+            return _MEMORY_UNAVAILABLE
 
-        def _do_add():
-            return mem.add(msgs, **kwargs)
-
-        return _mem0_call(call_with_graph, mem, enable_graph, _enable_graph_default, _do_add)
+        return _mem0_call(mem.add, msgs, **kwargs)
 
     @mcp.tool()
     def search_memories(
@@ -230,31 +249,28 @@ def _register_tools(mcp: FastMCP) -> None:
         limit: Annotated[int | None, Field(description="Maximum number of results.")] = None,
         threshold: Annotated[float | None, Field(description="Minimum relevance score (0.0-1.0).")] = None,
         rerank: Annotated[bool | None, Field(description="Whether to apply reranking.")] = None,
-        enable_graph: Annotated[bool | None, Field(description="Override default graph toggle.")] = None,
+        enable_graph: Annotated[bool | None, Field(description="Deprecated, ignored. mem0ai >= 2.0 always applies built-in entity linking.")] = None,
     ) -> str:
         """Semantic search across existing memories."""
+        _warn_enable_graph_deprecated("search_memories", enable_graph)
         uid = user_id or get_default_user_id()
 
-        kwargs: dict[str, Any] = {"user_id": uid, "query": query}
-        if agent_id:
-            kwargs["agent_id"] = agent_id
-        if run_id:
-            kwargs["run_id"] = run_id
-        if filters:
-            kwargs["filters"] = filters
+        kwargs: dict[str, Any] = {
+            "query": query,
+            "filters": _entity_filters(uid, agent_id, run_id, filters),
+        }
         if limit is not None:
-            kwargs["limit"] = limit
+            kwargs["top_k"] = limit
         if threshold is not None:
             kwargs["threshold"] = threshold
         if rerank is not None:
             kwargs["rerank"] = rerank
 
         mem = _ensure_memory()
+        if mem is None:
+            return _MEMORY_UNAVAILABLE
 
-        def _do_search():
-            return mem.search(**kwargs)
-
-        return _mem0_call(call_with_graph, mem, enable_graph, _enable_graph_default, _do_search)
+        return _mem0_call(mem.search, **kwargs)
 
     @mcp.tool()
     def get_memories(
@@ -266,17 +282,13 @@ def _register_tools(mcp: FastMCP) -> None:
         """Page through memories using filters instead of search."""
         uid = user_id or get_default_user_id()
 
-        kwargs: dict[str, Any] = {"user_id": uid}
-        if agent_id:
-            kwargs["agent_id"] = agent_id
-        if run_id:
-            kwargs["run_id"] = run_id
+        kwargs: dict[str, Any] = {"filters": _entity_filters(uid, agent_id, run_id)}
         if limit is not None:
-            kwargs["limit"] = limit
+            kwargs["top_k"] = limit
 
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return _MEMORY_UNAVAILABLE
         return _mem0_call(mem.get_all, **kwargs)
 
     @mcp.tool()
@@ -286,7 +298,7 @@ def _register_tools(mcp: FastMCP) -> None:
         """Fetch a single memory by its ID."""
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return _MEMORY_UNAVAILABLE
         return _mem0_call(mem.get, memory_id)
 
     @mcp.tool()
@@ -297,7 +309,7 @@ def _register_tools(mcp: FastMCP) -> None:
         """Overwrite an existing memory's text. Re-embeds and re-indexes."""
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return _MEMORY_UNAVAILABLE
 
         def _do_update():
             mem.update(memory_id, data=text)
@@ -312,7 +324,7 @@ def _register_tools(mcp: FastMCP) -> None:
         """Delete a single memory."""
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return _MEMORY_UNAVAILABLE
 
         def _do_delete():
             mem.delete(memory_id)
@@ -337,20 +349,14 @@ def _register_tools(mcp: FastMCP) -> None:
                 ensure_ascii=False,
             )
 
-        filters: dict[str, Any] = {}
-        if uid:
-            filters["user_id"] = uid
-        if agent_id:
-            filters["agent_id"] = agent_id
-        if run_id:
-            filters["run_id"] = run_id
+        filters = _entity_filters(uid, agent_id, run_id)
 
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return _MEMORY_UNAVAILABLE
 
         def _do_bulk_delete():
-            count = safe_bulk_delete(mem, filters, graph_enabled=_enable_graph_default)
+            count = safe_bulk_delete(mem, filters)
             return {"message": f"Deleted {count} memories.", "count": count}
 
         return _mem0_call(_do_bulk_delete)
@@ -368,7 +374,7 @@ def _register_tools(mcp: FastMCP) -> None:
         """
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return _MEMORY_UNAVAILABLE
 
         def _do_list():
             return list_entities_facet(mem)
@@ -391,40 +397,44 @@ def _register_tools(mcp: FastMCP) -> None:
                 ensure_ascii=False,
             )
 
-        filters: dict[str, Any] = {}
-        if user_id:
-            filters["user_id"] = user_id
-        if agent_id:
-            filters["agent_id"] = agent_id
-        if run_id:
-            filters["run_id"] = run_id
+        filters = _entity_filters(user_id, agent_id, run_id)
 
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return _MEMORY_UNAVAILABLE
 
         def _do_delete_entity():
-            count = safe_bulk_delete(mem, filters, graph_enabled=_enable_graph_default)
+            count = safe_bulk_delete(mem, filters)
             return {"message": f"Entity deleted. Removed {count} memories.", "count": count}
 
         return _mem0_call(_do_delete_entity)
 
     # ============================================================
-    # Direct Neo4j Graph Tools
+    # Direct Neo4j Graph Tools (legacy read-only)
     # ============================================================
 
     @mcp.tool()
     def mcp_search_graph(
         query: Annotated[str, Field(description="Entity or topic to search for (e.g., 'Python', 'TypeScript').")],
     ) -> str:
-        """Search entities by name/id substring matching in Neo4j knowledge graph."""
+        """Search entities by name/id substring matching in the legacy Neo4j knowledge graph.
+
+        Legacy read-only tool: mem0ai >= 2.0 no longer writes graph data
+        (built-in entity linking replaced graph memory). This searches the
+        historical Neo4j graph built by earlier versions.
+        """
         return search_graph(query)
 
     @mcp.tool()
     def mcp_get_entity(
         name: Annotated[str, Field(description="Exact entity name to look up.")],
     ) -> str:
-        """Get all relationships for a specific entity (bidirectional)."""
+        """Get all relationships for a specific entity (bidirectional) from the legacy Neo4j graph.
+
+        Legacy read-only tool: mem0ai >= 2.0 no longer writes graph data
+        (built-in entity linking replaced graph memory). This reads the
+        historical Neo4j graph built by earlier versions.
+        """
         return get_entity(name)
 
 
@@ -446,10 +456,11 @@ def _register_prompts(mcp: FastMCP) -> None:
             "2. Search memories: Use search_memories for semantic queries\n"
             "3. Browse memories: Use get_memories for filtered listing\n"
             "4. Update/Delete: Use update_memory and delete_memory for modifications\n"
-            "5. Graph exploration: Use search_graph and get_entity for entity relationships\n\n"
+            "5. Legacy graph: search_graph and get_entity read historical Neo4j data "
+            "(no longer written by mem0ai >= 2.0)\n\n"
             "Tips:\n"
             "- user_id is automatically injected from MEM0_USER_ID default\n"
-            "- Set enable_graph=true to include knowledge graph results\n"
+            "- Entity linking is built-in: add_memory automatically extracts entities\n"
             "- Use infer=false to store raw text without LLM extraction\n"
             "- Use threshold on search_memories to filter by relevance score\n"
             "- Use filters for structured queries: {\"key\": {\"eq\": \"value\"}}\n"

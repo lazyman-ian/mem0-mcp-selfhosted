@@ -73,13 +73,13 @@ class TestGetMemory:
         with patch.object(hooks, "_memory", sentinel):
             assert hooks._get_memory() is sentinel
 
-    def test_graph_disabled_in_env(self, monkeypatch):
-        """_get_memory() sets MEM0_ENABLE_GRAPH=false and caches result."""
+    def test_builds_registers_and_caches(self, monkeypatch):
+        """_get_memory() builds config, registers providers, and caches result."""
         calls = []
 
         def fake_build_config():
-            calls.append(os.environ.get("MEM0_ENABLE_GRAPH"))
-            return {}, [], None
+            calls.append("build_config")
+            return {}, []
 
         fake_mem = MagicMock(name="FreshMemory")
 
@@ -87,12 +87,13 @@ class TestGetMemory:
         monkeypatch.setattr(hooks, "_memory", None)
         with (
             patch("mem0_mcp_selfhosted.config.build_config", fake_build_config),
-            patch("mem0_mcp_selfhosted.server.register_providers"),
+            patch("mem0_mcp_selfhosted.server.register_providers") as mock_reg,
             patch("mem0.Memory.from_config", return_value=fake_mem),
         ):
             result = hooks._get_memory()
 
-        assert calls == ["false"]
+        assert calls == ["build_config"]
+        mock_reg.assert_called_once_with([])
         assert result is fake_mem
         # Verify the result was cached in the module global
         assert hooks._memory is fake_mem

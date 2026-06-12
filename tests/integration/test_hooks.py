@@ -1,7 +1,7 @@
 """Integration tests for hooks.py — verifies hooks work against live infrastructure.
 
 Tests the three integration boundaries that unit tests mock:
-1. _get_memory() creates a working Memory instance (graph disabled)
+1. _get_memory() creates a working Memory instance
 2. context_main() searches and returns real memories from Qdrant
 3. stop_main() saves session summaries via mem.add(infer=True)
 
@@ -11,7 +11,6 @@ Requires: Qdrant + Ollama (embedder) + LLM provider (Anthropic or Ollama).
 from __future__ import annotations
 
 import json
-import os
 import time
 from io import StringIO
 from unittest.mock import patch
@@ -35,30 +34,21 @@ def _capture_output(func, stdin_data: str = "{}") -> dict:
 
 @pytest.fixture(scope="module")
 def hook_memory(qdrant_url, ollama_url):
-    """Initialize a Memory instance the same way hooks do — graph disabled.
+    """Initialize a Memory instance the same way hooks do.
 
     Validates that _get_memory() works against live infrastructure.
     Cached for the module to avoid repeated initialization.
     """
-    original_graph = os.environ.get("MEM0_ENABLE_GRAPH")
     original_memory = hooks._memory
 
     # Reset cached instance so _get_memory() initializes fresh
     hooks._memory = None
     try:
         mem = hooks._get_memory()
-
-        # Verify graph was disabled
-        assert os.environ.get("MEM0_ENABLE_GRAPH") == "false"
         assert mem is not None
         yield mem
     finally:
-        # Restore
         hooks._memory = original_memory
-        if original_graph is not None:
-            os.environ["MEM0_ENABLE_GRAPH"] = original_graph
-        else:
-            os.environ.pop("MEM0_ENABLE_GRAPH", None)
 
 
 @pytest.fixture
@@ -69,7 +59,7 @@ def seeded_memory(hook_memory):
     facts = [
         "The project uses FastMCP as its MCP orchestrator framework",
         "Authentication uses a 3-tier token fallback: MEM0_ANTHROPIC_TOKEN then credentials.json then ANTHROPIC_API_KEY",
-        "Neo4j graph is disabled in hooks for performance within the 15-second timeout budget",
+        "Session hooks must finish within the 15-second Claude Code timeout budget",
     ]
 
     memory_ids = []
@@ -100,17 +90,6 @@ class TestGetMemoryIntegration:
         # Should have the core Memory API
         assert callable(getattr(hook_memory, "search", None))
         assert callable(getattr(hook_memory, "add", None))
-
-    def test_graph_is_disabled(self, hook_memory):
-        """Hook Memory instance has graph disabled for speed."""
-        # mem0 Memory stores graph config; when disabled, graph is None
-        # or enable_graph is False
-        graph_enabled = getattr(hook_memory, "enable_graph", None)
-        if graph_enabled is not None:
-            assert graph_enabled is False
-        else:
-            # Fallback: check env var was set correctly
-            assert os.environ.get("MEM0_ENABLE_GRAPH") == "false"
 
 
 class TestContextMainIntegration:
@@ -200,7 +179,7 @@ class TestStopMainIntegration:
             # Verify something was saved — search for the distinctive content
             search_result = hook_memory.search(
                 query="Qdrant MCP configuration",
-                user_id=user_id,
+                filters={"user_id": user_id},
             )
 
             results = search_result.get("results", [])
@@ -266,7 +245,7 @@ class TestStopMainIntegration:
                 )
 
             # Cleanup
-            search_result = hook_memory.search(query="auth middleware", user_id=user_id)
+            search_result = hook_memory.search(query="auth middleware", filters={"user_id": user_id})
             saved_ids = [r["id"] for r in search_result.get("results", [])]
         finally:
             for mid in saved_ids:

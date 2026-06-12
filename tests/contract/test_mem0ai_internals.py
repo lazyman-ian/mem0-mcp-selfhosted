@@ -9,6 +9,8 @@ not mocks. Skip with `pytest -m "not contract"` if deps unavailable.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 # Mark all tests in this module as contract tests
@@ -119,6 +121,98 @@ class TestLlmFactoryRegistration:
             assert "test_persist" in provider_map, (
                 "INVARIANT BROKEN: Registered provider must persist in LlmFactory."
             )
+
+
+class TestMem0V2Surface:
+    """Validate the mem0ai >= 2.0 API surface our code targets."""
+
+    def test_memoryconfig_has_no_graph_store(self):
+        """Graph memory was removed from OSS in 2.0 — config must not accept it."""
+        try:
+            from mem0.configs.base import MemoryConfig
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        fields = set(MemoryConfig.model_fields)
+        assert "graph_store" not in fields, (
+            "INVARIANT BROKEN: graph_store reappeared in MemoryConfig — "
+            "the graph removal assumptions in config.py no longer hold."
+        )
+        assert "custom_instructions" in fields
+        assert "custom_fact_extraction_prompt" not in fields
+
+    def test_graph_memory_module_removed(self):
+        """mem0.memory.graph_memory must not exist (no .graph attribute on Memory)."""
+        import importlib.util
+
+        if importlib.util.find_spec("mem0") is None:
+            pytest.skip("mem0ai not installed")
+
+        assert importlib.util.find_spec("mem0.memory.graph_memory") is None, (
+            "INVARIANT BROKEN: mem0.memory.graph_memory exists again."
+        )
+
+    def test_memory_has_entity_store(self):
+        """Built-in entity linking exposes the entity_store property."""
+        try:
+            from mem0.memory.main import Memory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        assert isinstance(
+            inspect.getattr_static(Memory, "entity_store"), property
+        ), "INVARIANT BROKEN: Memory.entity_store property missing."
+
+    def test_search_signature_uses_filters(self):
+        """search() takes filters/top_k/threshold keywords, not entity kwargs."""
+        try:
+            from mem0.memory.main import Memory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        params = inspect.signature(Memory.search).parameters
+        assert "filters" in params
+        assert "top_k" in params and params["top_k"].default == 20
+        assert "threshold" in params and params["threshold"].default == 0.1
+        assert "rerank" in params and params["rerank"].default is False
+        assert "user_id" not in params, (
+            "INVARIANT BROKEN: search() grew a top-level user_id param again."
+        )
+
+    def test_get_all_signature_uses_filters(self):
+        """get_all() takes filters/top_k keywords, not entity kwargs."""
+        try:
+            from mem0.memory.main import Memory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        params = inspect.signature(Memory.get_all).parameters
+        assert "filters" in params
+        assert "top_k" in params and params["top_k"].default == 20
+        assert "user_id" not in params
+
+    def test_update_uses_data_param(self):
+        """update() takes the new text via the 'data' parameter."""
+        try:
+            from mem0.memory.main import Memory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        params = inspect.signature(Memory.update).parameters
+        assert "data" in params, (
+            "INVARIANT BROKEN: Memory.update no longer has a 'data' parameter."
+        )
+
+    def test_qdrant_list_uses_top_k(self):
+        """Qdrant.list() takes top_k (helpers' scroll fallback depends on it)."""
+        try:
+            from mem0.vector_stores.qdrant import Qdrant
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        params = inspect.signature(Qdrant.list).parameters
+        assert "top_k" in params
+        assert "filters" in params
 
 
 class TestOllamaLLMInterface:

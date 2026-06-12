@@ -1,4 +1,4 @@
-"""Tests for llm_anthropic.py — parse_response, schema detection, extract_json, token refresh."""
+"""Tests for llm_anthropic.py — parse_response, structured output schema, extract_json, token refresh."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ import httpx
 import pytest
 
 from mem0_mcp_selfhosted.llm_anthropic import (
-    FACT_RETRIEVAL_SCHEMA,
-    MEMORY_UPDATE_SCHEMA,
+    ADDITIVE_EXTRACTION_SCHEMA,
     OAT_HEADERS,
     AnthropicOATLLM,
     extract_json,
@@ -103,25 +102,55 @@ class TestParseResponse:
         assert len(result["tool_calls"]) == 2
 
 
-class TestSchemaDetection:
-    def test_fact_extraction_has_system_message(self):
-        """System message present → FACT_RETRIEVAL_SCHEMA."""
-        llm = MagicMock(spec=AnthropicOATLLM)
-        messages = [
-            {"role": "system", "content": "Extract facts from the following..."},
-            {"role": "user", "content": "Alice prefers TypeScript"},
-        ]
-        result = AnthropicOATLLM._select_schema(llm, messages)
-        assert result == FACT_RETRIEVAL_SCHEMA
+class TestAdditiveExtractionSchema:
+    """mem0ai >= 2.0 makes a single JSON extraction call expecting {"memory": [...]}."""
 
-    def test_memory_update_no_system_message(self):
-        """No system message → MEMORY_UPDATE_SCHEMA."""
-        llm = MagicMock(spec=AnthropicOATLLM)
-        messages = [
-            {"role": "user", "content": "Update memory..."},
-        ]
-        result = AnthropicOATLLM._select_schema(llm, messages)
-        assert result == MEMORY_UPDATE_SCHEMA
+    def test_schema_shape_matches_mem0_parser(self):
+        """mem0 parses the response with json.loads(...).get("memory", []) —
+        the schema must require a top-level "memory" array of objects with text."""
+        assert ADDITIVE_EXTRACTION_SCHEMA["required"] == ["memory"]
+        items = ADDITIVE_EXTRACTION_SCHEMA["properties"]["memory"]["items"]
+        assert "text" in items["required"]
+        assert "attributed_to" in items["required"]
+        assert "linked_memory_ids" in items["properties"]
+
+    def test_structured_output_uses_additive_schema(self):
+        """response_format on a structured-capable model → output_config with the schema."""
+        llm = _make_llm(API_KEY)  # model claude-sonnet-4-* supports structured output
+        success = _make_api_response('{"memory": []}')
+        llm.client.messages.create = MagicMock(return_value=success)
+
+        llm.generate_response(
+            messages=[
+                {"role": "system", "content": "extraction prompt"},
+                {"role": "user", "content": "## New Messages\n..."},
+            ],
+            response_format={"type": "json_object"},
+        )
+
+        params = llm.client.messages.create.call_args.kwargs
+        assert params["output_config"]["format"]["schema"] is ADDITIVE_EXTRACTION_SCHEMA
+
+    def test_no_output_config_for_unsupported_model(self):
+        """Older models fall back to plain JSON extraction (no output_config)."""
+        with patch("mem0_mcp_selfhosted.llm_anthropic.resolve_token", return_value=API_KEY):
+            with patch("mem0_mcp_selfhosted.llm_anthropic.read_credentials_full", return_value=None):
+                with patch("anthropic.Anthropic"):
+                    from mem0_mcp_selfhosted.llm_anthropic import AnthropicOATConfig
+
+                    llm = AnthropicOATLLM(
+                        config=AnthropicOATConfig(model="claude-3-5-sonnet-20240620", auth_token=API_KEY)
+                    )
+        success = _make_api_response('{"memory": []}')
+        llm.client.messages.create = MagicMock(return_value=success)
+
+        llm.generate_response(
+            messages=[{"role": "user", "content": "test"}],
+            response_format={"type": "json_object"},
+        )
+
+        params = llm.client.messages.create.call_args.kwargs
+        assert "output_config" not in params
 
 
 # --- Helpers for token refresh tests ---

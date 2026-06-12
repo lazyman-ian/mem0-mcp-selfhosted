@@ -47,28 +47,20 @@ def _get_user_id() -> str:
 
 
 def _get_memory():
-    """Lazy-initialize and cache a mem0 Memory instance with graph disabled.
+    """Lazy-initialize and cache a mem0 Memory instance.
 
-    Graph is force-disabled for speed — hooks must complete within the
-    Claude Code timeout (15s for context, 30s for stop).  The instance
-    is cached in a module global; since each hook invocation is a
-    separate process, this only initializes once.
+    The instance is cached in a module global; since each hook invocation
+    is a separate process, this only initializes once.
     """
     global _memory
     if _memory is not None:
         return _memory
 
-    # Force graph off — the hard os.environ set overrides any .env value
-    # that load_dotenv() loaded at module init.
-    os.environ["MEM0_ENABLE_GRAPH"] = "false"
-
     from mem0_mcp_selfhosted.config import build_config
     from mem0_mcp_selfhosted.server import register_providers
 
-    config_dict, providers_info, _ = build_config()
+    config_dict, providers_info = build_config()
     register_providers(providers_info)
-    # patch_graph_sanitizer() skipped — graph is force-disabled in hooks,
-    # so the relationship sanitizer modules are never invoked.
 
     from mem0 import Memory
 
@@ -127,7 +119,7 @@ def context_main() -> None:
 
         for query in queries:
             results = _extract_results(
-                mem.search(query=query, user_id=user_id, limit=15)
+                mem.search(query=query, filters={"user_id": user_id}, top_k=15)
             )
             for r in results:
                 mid = r.get("id")

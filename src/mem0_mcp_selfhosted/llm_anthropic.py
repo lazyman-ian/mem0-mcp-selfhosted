@@ -40,19 +40,13 @@ OAT_HEADERS = {
     "x-app": "cli",
 }
 
-# --- Structured Output Schemas ---
-# Two schemas for the two call types in mem0ai's pipeline.
+# --- Structured Output Schema ---
+# mem0ai >= 2.0 makes a single JSON-mode LLM call per add(): additive
+# extraction (system prompt + user prompt) expecting {"memory": [...]}.
+# Items carry "text" (the extracted memory), "attributed_to" (user/assistant),
+# and optional "linked_memory_ids" referencing existing memory UUIDs.
 
-FACT_RETRIEVAL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "facts": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["facts"],
-    "additionalProperties": False,
-}
-
-MEMORY_UPDATE_SCHEMA = {
+ADDITIVE_EXTRACTION_SCHEMA = {
     "type": "object",
     "properties": {
         "memory": {
@@ -62,13 +56,16 @@ MEMORY_UPDATE_SCHEMA = {
                 "properties": {
                     "id": {"type": "string"},
                     "text": {"type": "string"},
-                    "event": {
+                    "attributed_to": {
                         "type": "string",
-                        "enum": ["ADD", "UPDATE", "DELETE", "NONE"],
+                        "enum": ["user", "assistant"],
                     },
-                    "old_memory": {"type": "string"},
+                    "linked_memory_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
                 },
-                "required": ["id", "text", "event"],
+                "required": ["id", "text", "attributed_to"],
                 "additionalProperties": False,
             },
         },
@@ -343,21 +340,9 @@ class AnthropicOATLLM(LLMBase):
         """Check if the configured model supports structured outputs."""
         return self.config.model.startswith(_STRUCTURED_OUTPUT_PREFIXES)
 
-    def _select_schema(self, messages: list[dict]) -> dict:
-        """Select structured output schema based on call type.
-
-        Detection: fact extraction calls always have a system message
-        (the prompt template); memory update calls have only a user message.
-        This is an intentional architectural invariant in mem0ai.
-        """
-        has_system = any(m.get("role") == "system" for m in messages)
-        if has_system:
-            return FACT_RETRIEVAL_SCHEMA
-        return MEMORY_UPDATE_SCHEMA
-
     @staticmethod
     def _parse_response(response: anthropic.types.Message) -> dict:
-        """Convert Anthropic tool_use blocks to dict format for graph_memory.py.
+        """Convert Anthropic tool_use blocks to the dict format mem0ai expects.
 
         Returns: {"content": "...", "tool_calls": [{"name": ..., "arguments": ...}]}
         """
@@ -451,11 +436,10 @@ class AnthropicOATLLM(LLMBase):
         # Path 1: Structured output (response_format, no tools)
         if response_format:
             if self._supports_structured_output():
-                schema = self._select_schema(messages)
                 params["output_config"] = {
                     "format": {
                         "type": "json_schema",
-                        "schema": schema,
+                        "schema": ADDITIVE_EXTRACTION_SCHEMA,
                     },
                 }
             # else: no output_config — rely on extractJson fallback

@@ -1,8 +1,6 @@
 """Shared utilities for mem0-mcp-selfhosted.
 
-- patch_graph_sanitizer(): Monkey-patches mem0ai's relationship sanitizer for Neo4j compliance
 - _mem0_call(): Error wrapper for all mem0ai calls
-- call_with_graph(): Concurrency-safe enable_graph toggle
 - safe_bulk_delete(): Iterate + individual delete (never memory.delete_all())
 - get_default_user_id(): Default user_id injection
 - list_entities_facet(): Qdrant Facet API entity listing with scroll fallback
@@ -12,129 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-import threading
 from typing import Any, Callable
 
 from mem0_mcp_selfhosted.env import env
 
 logger = logging.getLogger(__name__)
-
-# Valid Neo4j relationship type: must start with a letter or underscore,
-# followed by letters, digits, or underscores.
-_NEO4J_VALID_TYPE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-
-
-def _make_enhanced_sanitizer(original_fn: Callable[[str], str]) -> Callable[[str], str]:
-    """Wrap mem0ai's sanitize_relationship_for_cypher with Neo4j compliance fixes.
-
-    Fixes two gaps in the upstream sanitizer:
-    1. Hyphens and other ASCII characters not in the char_map
-    2. Leading digits (Neo4j types must start with a letter or underscore)
-
-    The wrapper calls the original first (preserving its 26+ special character
-    mappings), then applies additional fixes.
-    """
-
-    def enhanced(relationship: str) -> str:
-        # Run the original sanitizer first
-        sanitized = original_fn(relationship)
-
-        # Fix: replace hyphens (not in upstream char_map) with underscores
-        sanitized = sanitized.replace("-", "_")
-
-        # Fix: strip any remaining non-alphanumeric/underscore characters
-        sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", sanitized)
-
-        # Collapse consecutive underscores and strip edges
-        sanitized = re.sub(r"_+", "_", sanitized).strip("_")
-
-        # Fix: leading digit → prepend 'rel_' prefix
-        if sanitized and sanitized[0].isdigit():
-            sanitized = "rel_" + sanitized
-
-        # Fallback for empty result
-        if not sanitized:
-            sanitized = "related_to"
-
-        return sanitized
-
-    return enhanced
-
-
-def patch_graph_sanitizer() -> None:
-    """Monkey-patch mem0ai's relationship sanitizer for full Neo4j compliance.
-
-    Must be called AFTER mem0 modules are imported but BEFORE Memory.from_config().
-    Patches both the utils module and the already-imported references in
-    graph_memory/memgraph_memory.
-    """
-    import mem0.memory.utils as utils_module
-
-    original = utils_module.sanitize_relationship_for_cypher
-    enhanced = _make_enhanced_sanitizer(original)
-
-    # Patch the source module
-    utils_module.sanitize_relationship_for_cypher = enhanced
-
-    # Patch already-imported references (from ... import creates local bindings)
-    try:
-        import mem0.memory.graph_memory as graph_module
-
-        graph_module.sanitize_relationship_for_cypher = enhanced
-    except (ImportError, AttributeError):
-        pass
-
-    try:
-        import mem0.memory.memgraph_memory as memgraph_module
-
-        memgraph_module.sanitize_relationship_for_cypher = enhanced
-    except (ImportError, AttributeError):
-        pass
-
-    logger.info("Patched mem0ai relationship sanitizer for Neo4j compliance")
-
-
-def patch_gemini_parse_response() -> None:
-    """Monkey-patch mem0ai's GeminiLLM to guard against null content responses.
-
-    The upstream ``GeminiLLM._parse_response`` accesses
-    ``response.candidates[0].content.parts`` without checking that ``.content``
-    is not ``None``.  When the Gemini API returns a candidate with null content
-    (safety block, empty response, transient error), this raises
-    ``AttributeError: 'NoneType' object has no attribute 'parts'``.
-
-    Must be called AFTER mem0 modules are imported but BEFORE Memory.from_config().
-    """
-    try:
-        from mem0.llms.gemini import GeminiLLM
-    except ImportError:
-        logger.debug("mem0.llms.gemini not available — skipping Gemini null guard patch")
-        return
-
-    original = getattr(GeminiLLM, "_parse_response", None)
-    if original is None:
-        logger.debug("GeminiLLM._parse_response not found — skipping patch")
-        return
-
-    def _safe_parse_response(self, response, *args, **kwargs):  # noqa: ANN001
-        """Guarded _parse_response that handles null content gracefully."""
-        if (
-            response.candidates
-            and response.candidates[0].content is not None
-            and response.candidates[0].content.parts
-        ):
-            return original(self, response, *args, **kwargs)
-        logger.warning("[mem0] Gemini returned null content — returning empty string")
-        return ""
-
-    GeminiLLM._parse_response = _safe_parse_response
-    logger.info("Patched GeminiLLM._parse_response for null content guard")
-
-
-# Serializes enable_graph mutation + full Memory method execution.
-# Lock hold time is 2-20 seconds (see PRD §2.4).
-_graph_lock = threading.Lock()
 
 
 def get_default_user_id() -> str:
@@ -178,39 +58,12 @@ def _mem0_call(func: Callable, *args: Any, **kwargs: Any) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def call_with_graph(
-    memory: Any,
-    enable_graph: bool | None,
-    default_graph: bool,
-    func: Callable,
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    """Execute a Memory method with per-request enable_graph context.
-
-    Each tool call resolves its own effective enable_graph value and passes
-    it here. The lock ensures no concurrent request can observe a stale flag.
-
-    IMPORTANT: The lock is held for the full duration of func() (2-20s),
-    because Memory.add() blocks on concurrent.futures.wait() internally.
-    """
-    if memory is None:
-        raise RuntimeError("Memory not initialized. Infrastructure may be unavailable.")
-    effective = enable_graph if enable_graph is not None else default_graph
-    with _graph_lock:
-        memory.enable_graph = effective and memory.graph is not None
-        return func(*args, **kwargs)
-
-
-def safe_bulk_delete(memory: Any, filters: dict[str, Any], *, graph_enabled: bool = False) -> int:
+def safe_bulk_delete(memory: Any, filters: dict[str, Any]) -> int:
     """Safely delete all memories matching filters.
 
     NEVER calls memory.delete_all() (which triggers vector_store.reset()).
-    Instead: iterate + individual delete + mandatory graph cleanup.
-
-    Args:
-        graph_enabled: Explicit graph state from caller (avoids reading
-            mutable ``memory.enable_graph`` which races with ``call_with_graph``).
+    Instead: iterate + individual delete. memory.delete() also removes the
+    memory's links from the entity store (mem0ai >= 2.0 built-in behavior).
 
     Returns the count of deleted memories.
     """
@@ -228,13 +81,6 @@ def safe_bulk_delete(memory: Any, filters: dict[str, Any], *, graph_enabled: boo
             count += 1
         except Exception as exc:
             logger.warning("Failed to delete memory %s: %s", memory_id, exc)
-
-    # Mandatory graph cleanup — memory.delete() does NOT clean Neo4j (GitHub #3245)
-    if graph_enabled and hasattr(memory, "graph") and memory.graph is not None:
-        try:
-            memory.graph.delete_all(filters)
-        except Exception as exc:
-            logger.warning("Graph cleanup failed for filters %s: %s", filters, exc)
 
     return count
 
@@ -284,7 +130,7 @@ def _list_entities_scroll_fallback(memory: Any) -> dict[str, list[dict]]:
 
     # Scroll through all memories in batches
     # Qdrant.list() returns raw scroll result: (records, next_page_offset)
-    result = memory.vector_store.list(filters={}, limit=500)
+    result = memory.vector_store.list(filters={}, top_k=500)
     all_memories = result[0] if isinstance(result, tuple) else result
     for item in all_memories:
         payload = item.payload if hasattr(item, "payload") else item

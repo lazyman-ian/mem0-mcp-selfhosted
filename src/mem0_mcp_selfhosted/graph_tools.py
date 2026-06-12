@@ -1,7 +1,13 @@
-"""Direct Neo4j graph tools.
+"""Direct Neo4j graph tools (legacy read-only).
 
 Provides search_graph and get_entity via Cypher queries with a
-lazily-initialized Neo4j driver separate from mem0ai's graph store.
+lazily-initialized Neo4j driver.
+
+Legacy: mem0ai >= 2.0 removed graph memory from OSS, so no new graph data
+is ever written — built-in entity linking (the ``{collection}_entities``
+Qdrant collection) replaced it. These tools remain so historical Neo4j
+data written by mem0ai 1.x stays readable. When Neo4j is unreachable they
+return a structured ``graph_unavailable`` error instead of raising.
 """
 
 from __future__ import annotations

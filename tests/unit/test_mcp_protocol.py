@@ -51,8 +51,6 @@ def _env_defaults(monkeypatch):
 @pytest.fixture
 def mock_memory():
     mem = MagicMock()
-    mem.graph = None
-    mem.enable_graph = False
     mem.add.return_value = {"results": [{"id": "mem-1", "memory": "test fact"}]}
     mem.search.return_value = {"results": [{"id": "mem-1", "score": 0.95}]}
     mem.get_all.return_value = {"results": []}
@@ -66,16 +64,13 @@ def mock_memory():
 def mcp_server(mock_memory):
     """Create a FastMCP server with mocked Memory for protocol testing."""
     original_memory = server_mod.memory
-    original_graph_default = server_mod._enable_graph_default
     server_mod.memory = mock_memory
-    server_mod._enable_graph_default = False
 
     srv = server_mod._create_server()
 
     yield srv
 
     server_mod.memory = original_memory
-    server_mod._enable_graph_default = original_graph_default
 
 
 # ============================================================

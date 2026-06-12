@@ -2,15 +2,38 @@
 
 Reads all config from env vars with sensible defaults, constructs a
 mem0ai MemoryConfig dict, and returns provider registration info.
+
+Graph memory was removed from mem0ai OSS in 2.0 (no ``graph_store`` config,
+no Neo4j writes). Its replacement is mem0ai's built-in entity linking: every
+``add()`` extracts entities into a parallel ``{collection}_entities`` Qdrant
+collection automatically. The MEM0_ENABLE_GRAPH / MEM0_GRAPH_* env vars are
+therefore deprecated — they are still parsed here only to emit a warning so
+existing deployments notice instead of silently losing behavior.
 """
 
 from __future__ import annotations
 
-import os
+import logging
 from typing import Any, TypedDict
 
 from mem0_mcp_selfhosted.auth import resolve_token
 from mem0_mcp_selfhosted.env import bool_env, env, opt_env
+
+logger = logging.getLogger(__name__)
+
+# Graph-era env vars that no longer have any effect (mem0ai >= 2.0).
+# MEM0_NEO4J_* are NOT listed: they are still read by graph_tools.py for
+# legacy read-only access to a pre-existing Neo4j graph.
+_DEPRECATED_GRAPH_ENV_VARS = (
+    "MEM0_ENABLE_GRAPH",
+    "MEM0_GRAPH_LLM_PROVIDER",
+    "MEM0_GRAPH_LLM_MODEL",
+    "MEM0_GRAPH_LLM_URL",
+    "MEM0_GRAPH_THRESHOLD",
+    "MEM0_GRAPH_CONTRADICTION_LLM_PROVIDER",
+    "MEM0_GRAPH_CONTRADICTION_LLM_MODEL",
+    "MEM0_NEO4J_BASE_LABEL",
+)
 
 
 class ProviderInfo(TypedDict):
@@ -33,17 +56,35 @@ def _resolve_ollama_url(*env_keys: str) -> str:
     return env("MEM0_OLLAMA_URL") or "http://localhost:11434"
 
 
-def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] | None]:
+def _warn_deprecated_graph_env() -> None:
+    """Log a deprecation warning for any graph-era env vars still set.
+
+    Graph writes no longer exist in mem0ai 2.x; entity linking replaces them.
+    """
+    stale = [key for key in _DEPRECATED_GRAPH_ENV_VARS if opt_env(key) is not None]
+    if stale:
+        logger.warning(
+            "Deprecated graph env vars are set but have no effect with "
+            "mem0ai >= 2.0 (graph memory was removed from OSS; built-in "
+            "entity linking replaces it): %s. Remove them from your "
+            "environment. mcp_search_graph/mcp_get_entity still read "
+            "historical Neo4j data via MEM0_NEO4J_URL/USER/PASSWORD/DATABASE.",
+            ", ".join(stale),
+        )
+
+
+def build_config() -> tuple[dict[str, Any], list[ProviderInfo]]:
     """Build mem0ai MemoryConfig dict and provider registration info.
 
     Returns:
-        (config_dict, providers_info, split_config) where:
-        - providers_info: list of ProviderInfo dicts (name + class_path)
-        - split_config: if gemini_split was requested, config for the SplitModelGraphLLM
+        (config_dict, providers_info) where providers_info is a list of
+        ProviderInfo dicts (name + class_path) for LlmFactory registration.
     """
     token = resolve_token()
 
-    # --- Top-level provider default (cascades to LLM and graph LLM) ---
+    _warn_deprecated_graph_env()
+
+    # --- Top-level provider default (cascades to LLM) ---
     _provider_default = env("MEM0_PROVIDER", "anthropic")
     _supported_llm_providers = ("anthropic", "ollama", "openai")
     if _provider_default not in _supported_llm_providers:
@@ -144,91 +185,6 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
     if history_db_path:
         config_dict["history_db_path"] = history_db_path
 
-    # --- Graph Store (conditional) ---
-    enable_graph = bool_env("MEM0_ENABLE_GRAPH")
-    graph_llm_provider_raw: str | None = None  # set inside block, used for provider registration
-    if enable_graph:
-        neo4j_url = env("MEM0_NEO4J_URL", "bolt://127.0.0.1:7687")
-        neo4j_user = env("MEM0_NEO4J_USER", "neo4j")
-        neo4j_password = env("MEM0_NEO4J_PASSWORD", "mem0graph")
-        neo4j_database = opt_env("MEM0_NEO4J_DATABASE")
-        neo4j_base_label = opt_env("MEM0_NEO4J_BASE_LABEL")
-        graph_threshold = float(env("MEM0_GRAPH_THRESHOLD", "0.7"))
-
-        graph_neo4j_config: dict[str, Any] = {
-            "url": neo4j_url,
-            "username": neo4j_user,
-            "password": neo4j_password,
-        }
-        if neo4j_database:
-            # WORKAROUND: mem0ai's graph_memory.py passes config values as
-            # positional args to Neo4jGraph(url, username, password, ...) where
-            # the 4th param is `token`, NOT `database`. Putting database in the
-            # config dict causes it to land in token → AuthError.
-            # Set NEO4J_DATABASE env var instead — langchain_neo4j reads it via
-            # get_from_dict_or_env(). Upstream: mem0ai #3906, #3981, #4085.
-            # NOTE: Intentional process-global mutation — Neo4jGraph reads this
-            # env var at init time, which happens after build_config() returns.
-            os.environ["NEO4J_DATABASE"] = neo4j_database
-        if neo4j_base_label:
-            graph_neo4j_config["base_label"] = neo4j_base_label
-
-        # Graph LLM — MUST be explicit (mem0ai defaults to "openai" if omitted)
-        graph_llm_provider_raw = env("MEM0_GRAPH_LLM_PROVIDER", _provider_default)
-        graph_llm_provider = graph_llm_provider_raw
-        graph_llm_model = env("MEM0_GRAPH_LLM_MODEL", llm_model)
-
-        graph_llm_config: dict[str, Any] = {
-            "model": graph_llm_model,
-        }
-
-        if graph_llm_provider == "ollama":
-            graph_llm_config["ollama_base_url"] = _resolve_ollama_url(
-                "MEM0_GRAPH_LLM_URL", "MEM0_LLM_URL"
-            )
-        elif graph_llm_provider in ("anthropic", "anthropic_oat"):
-            if token:
-                graph_llm_config["api_key"] = token
-            graph_llm_config["max_tokens"] = llm_max_tokens
-        elif graph_llm_provider == "gemini":
-            # Use mem0ai's built-in GeminiLLM provider
-            # Default to flash-lite (not the main Claude model) when no explicit model set
-            graph_llm_config["model"] = env(
-                "MEM0_GRAPH_LLM_MODEL", "gemini-2.5-flash-lite"
-            )
-            google_api_key = opt_env("GOOGLE_API_KEY")
-            if google_api_key:
-                graph_llm_config["api_key"] = google_api_key
-        elif graph_llm_provider == "openai":
-            openai_api_key = opt_env("MEM0_OPENAI_API_KEY") or opt_env("OPENAI_API_KEY")
-            openai_base_url = opt_env("MEM0_OPENAI_BASE_URL") or opt_env("OPENAI_BASE_URL")
-            if openai_api_key:
-                graph_llm_config["api_key"] = openai_api_key
-            if openai_base_url:
-                graph_llm_config["openai_base_url"] = openai_base_url
-        elif graph_llm_provider == "gemini_split":
-            # Split-model router: Gemini for extraction, separate LLM for contradiction.
-            # Use "gemini" as config provider (passes pydantic validation), then
-            # server.py swaps the graph LLM to the SplitModelGraphLLM after creation.
-            graph_llm_config["model"] = env(
-                "MEM0_GRAPH_LLM_MODEL", "gemini-2.5-flash-lite"
-            )
-            google_api_key = opt_env("GOOGLE_API_KEY")
-            if google_api_key:
-                graph_llm_config["api_key"] = google_api_key
-            # Override provider to "gemini" for pydantic validation
-            graph_llm_provider = "gemini"
-
-        config_dict["graph_store"] = {
-            "provider": "neo4j",
-            "config": graph_neo4j_config,
-            "threshold": graph_threshold,
-            "llm": {
-                "provider": graph_llm_provider,
-                "config": graph_llm_config,
-            },
-        }
-
     # --- Provider registration info ---
     # Always register custom Ollama provider — strict superset of upstream
     # OllamaLLM (restores tool-calling removed in mem0ai PR #3241).
@@ -239,55 +195,10 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
             "class_path": "mem0_mcp_selfhosted.llm_ollama.OllamaToolLLM",
         },
     ]
-    # Register Anthropic when used as main LLM, graph LLM, or contradiction LLM
-    contradiction_provider = env(
-        "MEM0_GRAPH_CONTRADICTION_LLM_PROVIDER", "anthropic"
-    )
-    _needs_anthropic = (
-        llm_provider == "anthropic"
-        or (enable_graph and graph_llm_provider_raw in ("anthropic", "anthropic_oat"))
-        or (enable_graph and graph_llm_provider_raw == "gemini_split"
-            and contradiction_provider in ("anthropic", "anthropic_oat"))
-    )
-    if _needs_anthropic:
+    if llm_provider == "anthropic":
         providers_info.append({
             "name": "anthropic",
             "class_path": "mem0_mcp_selfhosted.llm_anthropic.AnthropicOATLLM",
         })
 
-    # Split-model config: if gemini_split was requested, provide the config
-    # for server.py to swap the graph LLM after Memory creation.
-    split_config: dict[str, Any] | None = None
-    if enable_graph and graph_llm_provider_raw == "gemini_split":
-        extraction_model = env("MEM0_GRAPH_LLM_MODEL", "gemini-2.5-flash-lite")
-        google_api_key = opt_env("GOOGLE_API_KEY")
-        contradiction_provider = env(
-            "MEM0_GRAPH_CONTRADICTION_LLM_PROVIDER", "anthropic"
-        )
-        # Provider-aware default: when contradiction provider is anthropic,
-        # default to a Claude model (not the main LLM model which may be Ollama).
-        _contradiction_model_defaults = {
-            "anthropic": "claude-opus-4-6",
-            "anthropic_oat": "claude-opus-4-6",
-        }
-        contradiction_model = env(
-            "MEM0_GRAPH_CONTRADICTION_LLM_MODEL",
-            _contradiction_model_defaults.get(contradiction_provider, llm_model),
-        )
-        split_config = {
-            "extraction_provider": "gemini",
-            "extraction_model": extraction_model,
-            "contradiction_provider": contradiction_provider,
-            "contradiction_model": contradiction_model,
-            "contradiction_max_tokens": llm_max_tokens,
-        }
-        if google_api_key:
-            split_config["extraction_api_key"] = google_api_key
-        if contradiction_provider in ("anthropic", "anthropic_oat") and token:
-            split_config["contradiction_api_key"] = token
-        elif contradiction_provider == "ollama":
-            split_config["contradiction_ollama_base_url"] = _resolve_ollama_url(
-                "MEM0_GRAPH_LLM_URL", "MEM0_LLM_URL"
-            )
-
-    return config_dict, providers_info, split_config
+    return config_dict, providers_info
