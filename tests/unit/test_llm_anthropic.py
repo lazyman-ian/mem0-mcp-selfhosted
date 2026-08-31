@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import MagicMock, patch
 
 import anthropic
@@ -11,6 +12,7 @@ import pytest
 from mem0_mcp_selfhosted.llm_anthropic import (
     ADDITIVE_EXTRACTION_SCHEMA,
     OAT_HEADERS,
+    AnthropicOATConfig,
     AnthropicOATLLM,
     extract_json,
 )
@@ -764,3 +766,48 @@ class TestGenerateResponseEmptyContent:
         )
 
         assert result == "hello world"
+
+
+class TestSamplingParams:
+    """Sampling params must not reach messages.create() as top-level kwargs.
+
+    anthropic SDK 1.x removed temperature/top_p/top_k from the create()
+    signature — passing one raises TypeError before any request is made.
+    The DashScope-compatible endpoint still honours temperature and mem0
+    fact extraction depends on deterministic output, so it rides in
+    extra_body, which the SDK merges into the request JSON verbatim.
+    """
+
+    def _capture_create_params(self, temperature: float | None) -> dict:
+        config = AnthropicOATConfig(
+            model="qwen3.5-plus",
+            api_key="sk-test",
+            max_tokens=1024,
+            temperature=temperature,
+        )
+        llm = AnthropicOATLLM(config)
+
+        block = MagicMock()
+        block.type = "text"
+        block.text = "ok"
+        response = MagicMock()
+        response.content = [block]
+
+        with patch.object(llm.client.messages, "create", return_value=response) as create:
+            llm.generate_response([{"role": "user", "content": "hi"}])
+        return create.call_args.kwargs
+
+    def test_temperature_rides_in_extra_body(self):
+        params = self._capture_create_params(0.1)
+        assert "temperature" not in params
+        assert params["extra_body"]["temperature"] == 0.1
+
+    def test_no_extra_body_when_temperature_unset(self):
+        params = self._capture_create_params(None)
+        assert "extra_body" not in params
+
+    def test_params_bind_to_installed_sdk_signature(self):
+        """Guards against SDK drift: every kwarg must exist on the real create()."""
+        params = self._capture_create_params(0.1)
+        client = anthropic.Anthropic(api_key="sk-test")
+        inspect.signature(client.messages.create).bind(**params)

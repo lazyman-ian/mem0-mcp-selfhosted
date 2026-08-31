@@ -391,9 +391,15 @@ class AnthropicOATLLM(LLMBase):
             "messages": api_messages,
             "max_tokens": self.config.max_tokens or 4096,
         }
-        # Anthropic rejects temperature + top_p together — only send temperature
+        # anthropic SDK 1.x removed temperature/top_p/top_k from the
+        # messages.create() signature — passing one raises TypeError before the
+        # request is built. The DashScope-compatible endpoint still honours
+        # temperature and mem0 fact extraction depends on deterministic output,
+        # so send it via extra_body, which the SDK merges into the request JSON
+        # verbatim. (Anthropic rejects temperature + top_p together, so only
+        # temperature is sent.)
         if self.config.temperature is not None:
-            params["temperature"] = self.config.temperature
+            params.setdefault("extra_body", {})["temperature"] = self.config.temperature
         if system_parts:
             params["system"] = "\n\n".join(system_parts)
         # Disable thinking for models that enable it by default (e.g., DashScope qwen3.5-plus).

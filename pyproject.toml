@@ -22,7 +22,12 @@ dependencies = [
     # nlp extra (spaCy) is required: entity linking — the 2.x replacement for
     # graph memory — silently no-ops without it (extract_entities returns []).
     "mem0ai[llms,nlp]>=2.0,<3",
-    "anthropic>=0.77.0",
+    # Upper bound is required for the same reason as mcp above: anthropic 1.x
+    # removed temperature/top_p/top_k from messages.create() (TypeError), so an
+    # unbounded floor silently changes the call contract on a minor resolve.
+    # Floor is 1.0: llm_anthropic.py is written and tested against the 1.x
+    # signature (sampling params ride in extra_body).
+    "anthropic>=1,<2",
     "neo4j>=5.23.1",
     "python-dotenv>=1.2.1",
 ]
