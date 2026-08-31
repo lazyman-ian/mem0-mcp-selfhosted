@@ -12,6 +12,9 @@ build/
 venv/
 env/
 
+# uv (dev artifact — `uvx --from git+…` resolves from pyproject.toml, not a lock)
+uv.lock
+
 # pytest
 .pytest_cache/
 
