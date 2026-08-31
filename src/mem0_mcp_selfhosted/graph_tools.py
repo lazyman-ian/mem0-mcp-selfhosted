@@ -38,12 +38,14 @@ def _get_driver():
     url = env("MEM0_NEO4J_URL", "bolt://127.0.0.1:7687")
     user = env("MEM0_NEO4J_USER", "neo4j")
     password = env("MEM0_NEO4J_PASSWORD", "mem0graph")
-    database = opt_env("MEM0_NEO4J_DATABASE")
 
+    # MEM0_NEO4J_DATABASE is applied per-session in _run_query() via the public
+    # session(database=...) API. Do not set it on the driver: the private
+    # Driver._default_database of neo4j 5.x is gone in 6.x, so assigning it did
+    # nothing, and would raise (and be swallowed into a None driver) the moment
+    # the class gains __slots__.
     try:
         _driver = GraphDatabase.driver(url, auth=(user, password))
-        if database:
-            _driver._default_database = database
         return _driver
     except Exception as exc:
         logger.error("Failed to create Neo4j driver: %s", exc)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -163,3 +164,56 @@ class TestGetEntity:
         with patch("mem0_mcp_selfhosted.graph_tools._get_driver", return_value=None):
             result = json.loads(gt.get_entity("Alice"))
             assert result["error"] == "graph_unavailable"
+
+
+class TestDatabaseSelection:
+    """MEM0_NEO4J_DATABASE must reach Neo4j via the public session(database=...) API.
+
+    neo4j 5.x exposed a private Driver._default_database; 6.x removed it, so
+    assigning it was a silent no-op — it neither selected a database nor raised.
+    """
+
+    def setup_method(self):
+        gt._driver = None
+
+    def _run_query_with_env(self, env_overrides: dict):
+        mock_session = MagicMock()
+        mock_session.run.return_value = []
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_driver = MagicMock()
+        mock_driver.session.return_value = mock_session
+
+        gt._driver = mock_driver
+        with patch.dict("os.environ", env_overrides, clear=False):
+            if "MEM0_NEO4J_DATABASE" not in env_overrides:
+                os.environ.pop("MEM0_NEO4J_DATABASE", None)
+            gt._run_query("MATCH (n) RETURN n")
+        return mock_driver
+
+    def test_database_reaches_session(self):
+        driver = self._run_query_with_env({"MEM0_NEO4J_DATABASE": "custom_db"})
+        driver.session.assert_called_once_with(database="custom_db")
+
+    def test_unset_database_uses_default_session(self):
+        driver = self._run_query_with_env({})
+        driver.session.assert_called_once_with()
+
+    def test_get_driver_writes_no_private_attributes(self):
+        """Regression: _get_driver must not assign Driver._default_database.
+
+        The stub is slotted, so any private-attribute write raises AttributeError,
+        which _get_driver would swallow and return None for.
+        """
+
+        class SlottedDriver:
+            __slots__ = ()
+
+        stub = SlottedDriver()
+        mock_gdb = MagicMock()
+        mock_gdb.GraphDatabase.driver.return_value = stub
+
+        with patch.dict("sys.modules", {"neo4j": mock_gdb}), \
+                patch.dict("os.environ", {"MEM0_NEO4J_DATABASE": "custom_db"}, clear=False):
+            gt._driver = None
+            assert gt._get_driver() is stub
