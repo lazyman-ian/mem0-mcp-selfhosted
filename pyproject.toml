@@ -12,7 +12,13 @@ authors = [
     { name = "elvismdev" },
 ]
 dependencies = [
-    "mcp[cli]>=1.23.0",
+    # Upper bound is required: server.py targets the mcp 1.x API
+    # (mcp.server.fastmcp.FastMCP). mcp 2.x renamed it to
+    # mcp.server.mcpserver.MCPServer and changed other APIs, so an
+    # unbounded ">=1.23.0" resolves to 2.x and crashes at import time.
+    # TODO: migrate server.py to the mcp 2.x MCPServer API, then drop <2.
+    # https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver
+    "mcp[cli]>=1.23.0,<2",
     # nlp extra (spaCy) is required: entity linking — the 2.x replacement for
     # graph memory — silently no-ops without it (extract_entities returns []).
     "mem0ai[llms,nlp]>=2.0,<3",
