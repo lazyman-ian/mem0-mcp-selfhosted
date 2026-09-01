@@ -22,8 +22,9 @@ from mem0_mcp_selfhosted.env import bool_env, env, opt_env
 logger = logging.getLogger(__name__)
 
 # Graph-era env vars that no longer have any effect (mem0ai >= 2.0).
-# MEM0_NEO4J_* are NOT listed: they are still read by graph_tools.py for
-# legacy read-only access to a pre-existing Neo4j graph.
+# MEM0_NEO4J_* joined the list when the legacy read-only graph tools
+# (mcp_search_graph/mcp_get_entity) and graph_tools.py were removed —
+# nothing reads a Neo4j connection anymore.
 _DEPRECATED_GRAPH_ENV_VARS = (
     "MEM0_ENABLE_GRAPH",
     "MEM0_GRAPH_LLM_PROVIDER",
@@ -33,6 +34,10 @@ _DEPRECATED_GRAPH_ENV_VARS = (
     "MEM0_GRAPH_CONTRADICTION_LLM_PROVIDER",
     "MEM0_GRAPH_CONTRADICTION_LLM_MODEL",
     "MEM0_NEO4J_BASE_LABEL",
+    "MEM0_NEO4J_URL",
+    "MEM0_NEO4J_USER",
+    "MEM0_NEO4J_PASSWORD",
+    "MEM0_NEO4J_DATABASE",
 )
 
 
@@ -67,8 +72,7 @@ def _warn_deprecated_graph_env() -> None:
             "Deprecated graph env vars are set but have no effect with "
             "mem0ai >= 2.0 (graph memory was removed from OSS; built-in "
             "entity linking replaces it): %s. Remove them from your "
-            "environment. mcp_search_graph/mcp_get_entity still read "
-            "historical Neo4j data via MEM0_NEO4J_URL/USER/PASSWORD/DATABASE.",
+            "environment.",
             ", ".join(stale),
         )
 

@@ -23,8 +23,6 @@ EXPECTED_TOOLS = {
     "delete_all_memories",
     "list_entities",
     "delete_entities",
-    "mcp_search_graph",
-    "mcp_get_entity",
 }
 
 # Required parameters per tool (tool_name -> set of required param names)
@@ -38,8 +36,6 @@ REQUIRED_PARAMS = {
     "delete_all_memories": set(),
     "list_entities": set(),
     "delete_entities": set(),
-    "mcp_search_graph": {"query"},
-    "mcp_get_entity": {"name"},
 }
 
 
@@ -80,11 +76,11 @@ def mcp_server(mock_memory):
 
 class TestToolDiscovery:
     @pytest.mark.asyncio
-    async def test_list_tools_returns_all_11(self, mcp_server):
+    async def test_list_tools_returns_all_9(self, mcp_server):
         tools = await mcp_server.list_tools()
         tool_names = {t.name for t in tools}
         assert tool_names == EXPECTED_TOOLS
-        assert len(tools) == 11
+        assert len(tools) == 9
 
     @pytest.mark.asyncio
     async def test_tool_schemas_have_required_params(self, mcp_server):

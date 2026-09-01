@@ -3,7 +3,7 @@
 Orchestrates: tool registration → transport → lazy Memory init on first call.
 Memory initialization is deferred to the first tool invocation via _ensure_memory(),
 allowing the server to respond to MCP initialize/tools/list without live infrastructure.
-All 11 MCP tools + memory_assistant prompt.
+All 9 MCP tools + memory_assistant prompt.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from pydantic import Field
 
 from mem0_mcp_selfhosted.config import ProviderInfo, build_config
 from mem0_mcp_selfhosted.env import env
-from mem0_mcp_selfhosted.graph_tools import get_entity, search_graph
 from mem0_mcp_selfhosted.helpers import (
     _mem0_call,
     get_default_user_id,
@@ -107,7 +106,6 @@ def _ensure_memory() -> Any:
 
     Returns the Memory instance, or None if initialization failed.
     After a failure, waits ``_INIT_RETRY_COOLDOWN`` seconds before retrying.
-    Matches the lazy-init pattern used by ``graph_tools._get_driver()``.
     """
     global memory, _last_init_failure
 
@@ -155,16 +153,6 @@ def _entity_filters(
     return filters
 
 
-def _warn_enable_graph_deprecated(tool_name: str, enable_graph: bool | None) -> None:
-    """Log when a caller still passes the deprecated enable_graph parameter."""
-    if enable_graph is not None:
-        logger.warning(
-            "%s: enable_graph parameter is deprecated and ignored — mem0ai >= 2.0 "
-            "removed graph memory; built-in entity linking always applies.",
-            tool_name,
-        )
-
-
 def _create_server() -> FastMCP:
     """Create and configure the FastMCP server with all tools and prompts."""
     global mcp
@@ -181,7 +169,6 @@ def _create_server() -> FastMCP:
             "Use search_memories to find relevant context before starting work. "
             "Use add_memory to store important facts, preferences, and decisions. "
             "Use get_memories to browse stored memories with filters. "
-            "Use search_graph to find relationships between entities. "
             "Use get_memory to retrieve a specific memory by ID. "
             "Use update_memory to modify existing memories. "
             "Use list_entities to see who/what has stored memories."
@@ -200,7 +187,7 @@ def _create_server() -> FastMCP:
 
 
 def _register_tools(mcp: FastMCP) -> None:
-    """Register all 11 MCP tools on the server."""
+    """Register all 9 MCP tools on the server."""
 
     @mcp.tool()
     def add_memory(
@@ -211,10 +198,8 @@ def _register_tools(mcp: FastMCP) -> None:
         run_id: Annotated[str | None, Field(description="Run scope identifier.")] = None,
         metadata: Annotated[dict | None, Field(description="Arbitrary metadata JSON to store alongside the memory.")] = None,
         infer: Annotated[bool | None, Field(description="If true (default), LLM extracts key facts. If false, stores raw text.")] = None,
-        enable_graph: Annotated[bool | None, Field(description="Deprecated, ignored. mem0ai >= 2.0 always applies built-in entity linking.")] = None,
     ) -> str:
         """Store a new memory. Requires at least one of user_id, agent_id, or run_id."""
-        _warn_enable_graph_deprecated("add_memory", enable_graph)
         uid = user_id or get_default_user_id()
 
         # Build messages for mem0ai
@@ -249,10 +234,8 @@ def _register_tools(mcp: FastMCP) -> None:
         limit: Annotated[int | None, Field(description="Maximum number of results.")] = None,
         threshold: Annotated[float | None, Field(description="Minimum relevance score (0.0-1.0).")] = None,
         rerank: Annotated[bool | None, Field(description="Whether to apply reranking.")] = None,
-        enable_graph: Annotated[bool | None, Field(description="Deprecated, ignored. mem0ai >= 2.0 always applies built-in entity linking.")] = None,
     ) -> str:
         """Semantic search across existing memories."""
-        _warn_enable_graph_deprecated("search_memories", enable_graph)
         uid = user_id or get_default_user_id()
 
         kwargs: dict[str, Any] = {
@@ -409,34 +392,6 @@ def _register_tools(mcp: FastMCP) -> None:
 
         return _mem0_call(_do_delete_entity)
 
-    # ============================================================
-    # Direct Neo4j Graph Tools (legacy read-only)
-    # ============================================================
-
-    @mcp.tool()
-    def mcp_search_graph(
-        query: Annotated[str, Field(description="Entity or topic to search for (e.g., 'Python', 'TypeScript').")],
-    ) -> str:
-        """Search entities by name/id substring matching in the legacy Neo4j knowledge graph.
-
-        Legacy read-only tool: mem0ai >= 2.0 no longer writes graph data
-        (built-in entity linking replaced graph memory). This searches the
-        historical Neo4j graph built by earlier versions.
-        """
-        return search_graph(query)
-
-    @mcp.tool()
-    def mcp_get_entity(
-        name: Annotated[str, Field(description="Exact entity name to look up.")],
-    ) -> str:
-        """Get all relationships for a specific entity (bidirectional) from the legacy Neo4j graph.
-
-        Legacy read-only tool: mem0ai >= 2.0 no longer writes graph data
-        (built-in entity linking replaced graph memory). This reads the
-        historical Neo4j graph built by earlier versions.
-        """
-        return get_entity(name)
-
 
 # ============================================================
 # MCP Prompt
@@ -455,9 +410,7 @@ def _register_prompts(mcp: FastMCP) -> None:
             "1. Store memories: Use add_memory to save facts, preferences, or conversations\n"
             "2. Search memories: Use search_memories for semantic queries\n"
             "3. Browse memories: Use get_memories for filtered listing\n"
-            "4. Update/Delete: Use update_memory and delete_memory for modifications\n"
-            "5. Legacy graph: search_graph and get_entity read historical Neo4j data "
-            "(no longer written by mem0ai >= 2.0)\n\n"
+            "4. Update/Delete: Use update_memory and delete_memory for modifications\n\n"
             "Tips:\n"
             "- user_id is automatically injected from MEM0_USER_ID default\n"
             "- Entity linking is built-in: add_memory automatically extracts entities\n"

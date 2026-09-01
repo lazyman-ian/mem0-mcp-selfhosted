@@ -12,7 +12,6 @@ Uses the `mem0ai` package directly as a library, supports both Claude's OAT toke
 |---------|----------|---------|
 | **Qdrant** | Yes | Vector memory storage and search |
 | **Ollama** | Yes | Embedding generation (`bge-m3`) and optionally local LLM |
-| **Neo4j 5+** | Optional | Legacy only: read historical graph data written by mem0ai 1.x |
 
 Python >= 3.10 and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
@@ -177,18 +176,6 @@ The server resolves an Anthropic token using a prioritized fallback chain:
 | `list_entities` | List users/agents/runs with memory counts. Uses Qdrant Facet API. |
 | `delete_entities` | Cascade-delete an entity and all its memories. |
 
-### Graph Tools (legacy read-only)
-
-mem0ai >= 2.0 removed graph memory from OSS — no new graph data is written.
-These tools remain so a historical Neo4j graph written by mem0ai 1.x stays
-readable. They return a structured `graph_unavailable` error when Neo4j is
-unreachable.
-
-| Tool | Description |
-|------|-------------|
-| `search_graph` | Search legacy Neo4j entities by name substring. Returns entities + outgoing relationships. |
-| `get_entity` | Get all relationships for an entity (bidirectional: incoming + outgoing). |
-
 ### Prompt
 
 The server registers a `memory_assistant` MCP prompt that provides Claude with a quick-start guide for using the memory tools effectively.
@@ -198,7 +185,6 @@ The server registers a `memory_assistant` MCP prompt that provides Claude with a
 All tools use Pydantic `Annotated[type, Field(description=...)]` for self-documenting parameter schemas. Common patterns:
 
 - **`user_id`** defaults to `MEM0_USER_ID` env var when not provided
-- **`enable_graph`** is deprecated and ignored (kept for caller compatibility) — entity linking is always on
 - **`filters`** supports structured operators: `{"key": {"eq": "value"}}`, `{"AND": [...]}`
 - All responses are JSON strings via `json.dumps(result, ensure_ascii=False)`
 
@@ -247,19 +233,6 @@ All configuration is via environment variables. Create a `.env` file or set them
 | `MEM0_QDRANT_TIMEOUT` | _(client default)_ | Qdrant REST API timeout in seconds (e.g., `30`). Only set if you hit `ReadTimeout` during collection operations |
 | `MEM0_COLLECTION` | `mem0_mcp_selfhosted` | Qdrant collection name |
 
-### Legacy Neo4j (read-only graph tools)
-
-These are read by `search_graph`/`get_entity` only. mem0ai >= 2.0 never
-writes graph data; `MEM0_ENABLE_GRAPH` and the other `MEM0_GRAPH_*` vars
-are deprecated no-ops that log a warning when set.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEM0_NEO4J_URL` | `bolt://127.0.0.1:7687` | Neo4j Bolt endpoint |
-| `MEM0_NEO4J_USER` | `neo4j` | Neo4j username |
-| `MEM0_NEO4J_PASSWORD` | `mem0graph` | Neo4j password |
-| `MEM0_NEO4J_DATABASE` | -- | Neo4j database name (multi-database setups) |
-
 ### Server
 
 | Variable | Default | Description |
@@ -284,9 +257,8 @@ Claude Code
   │     ├── llm_ollama.py        ← Custom Ollama LLM provider (restored tool-calling)
   │     ├── config.py            ← Env vars → MemoryConfig dict (provider + URL cascades)
   │     ├── helpers.py           ← Error wrapper, safe bulk-delete, entity listing
-  │     ├── graph_tools.py       ← Legacy read-only Neo4j Cypher queries (lazy driver)
   │     ├── __init__.py          ← Telemetry suppression (before any mem0 import)
-  │     └── server.py            ← FastMCP orchestrator (11 tools + prompt)
+  │     └── server.py            ← FastMCP orchestrator (9 tools + prompt)
   │           |
   │           ├── mem0ai Memory class (>= 2.0)
   │           │     ├── Vector: LLM additive extraction → Ollama embed → Qdrant
@@ -295,7 +267,6 @@ Claude Code
   │           └── Infrastructure
   │                 ├── Qdrant          ← Vector store + entity store
   │                 ├── Ollama          ← Embeddings
-  │                 ├── Neo4j           ← Legacy graph (optional, read-only)
   │                 └── Anthropic/Ollama ← Main LLM (configurable)
   |
   └── Session Hooks (subprocess, not MCP)
@@ -316,8 +287,8 @@ matching, and entity boosting — no configuration needed and no extra
 Claude quota cost.
 
 The Neo4j graph written by earlier versions of this server is not
-migrated; it stays readable via the legacy `search_graph`/`get_entity`
-tools.
+migrated. The legacy read-only graph tools were removed once that graph
+went stale; a `neo4j-admin database dump` backup is the recovery path.
 
 ## Transport Modes
 
@@ -350,7 +321,7 @@ python3 -m pytest tests/ -v
 
 ### Test Structure
 
-- **`tests/unit/`** -- Pure unit tests with mocked dependencies (env, auth, config, config matrix, MCP protocol, helpers, hooks, LLM providers, graph tools, server)
+- **`tests/unit/`** -- Pure unit tests with mocked dependencies (env, auth, config, config matrix, MCP protocol, helpers, hooks, LLM providers, server)
 - **`tests/contract/`** -- Validates assumptions about mem0ai internals (additive extraction call shape, 2.x search/get_all/update signatures, `vector_store.client` access path, `LlmFactory` registration idempotency)
 - **`tests/integration/`** -- Live infrastructure tests (memory lifecycle, bulk operations, hooks) against real Qdrant + Ollama. Marked with `@pytest.mark.integration`.
 

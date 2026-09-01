@@ -98,17 +98,6 @@ class TestAddMemory:
         _, kwargs = mem.add.call_args
         assert kwargs["user_id"] == "test-user"
 
-    def test_enable_graph_param_is_ignored(self, server_with_mock):
-        """Deprecated enable_graph is accepted for compat but never forwarded."""
-        srv, mem = server_with_mock
-        fn = _get_tool_fn(srv, "add_memory")
-        result = fn(text="some fact", enable_graph=True)
-        _, kwargs = mem.add.call_args
-        assert "enable_graph" not in kwargs
-        parsed = json.loads(result)
-        assert "results" in parsed
-
-
 class TestSearchMemories:
     def test_entity_ids_go_into_filters(self, server_with_mock):
         """mem0ai 2.x rejects top-level entity kwargs — they must be in filters."""
@@ -244,24 +233,6 @@ class TestDeleteEntities:
         assert parsed["count"] == 5
 
 
-class TestGraphTools:
-    @patch("mem0_mcp_selfhosted.server.search_graph")
-    def test_search_graph_delegation(self, mock_sg, server_with_mock):
-        mock_sg.return_value = '{"entities": []}'
-        srv, _ = server_with_mock
-        fn = _get_tool_fn(srv, "mcp_search_graph")
-        fn(query="Python")
-        mock_sg.assert_called_once_with("Python")
-
-    @patch("mem0_mcp_selfhosted.server.get_entity")
-    def test_get_entity_delegation(self, mock_ge, server_with_mock):
-        mock_ge.return_value = '{"relationships": []}'
-        srv, _ = server_with_mock
-        fn = _get_tool_fn(srv, "mcp_get_entity")
-        fn(name="TypeScript")
-        mock_ge.assert_called_once_with("TypeScript")
-
-
 # ============================================================
 # 3. Error Handling and Initialization Tests
 # ============================================================
@@ -369,10 +340,10 @@ class TestRegisterProviders:
 
 
 class TestCreateServer:
-    def test_registers_11_tools(self):
+    def test_registers_9_tools(self):
         srv = server_mod._create_server()
         tools = srv._tool_manager._tools
-        assert len(tools) == 11, f"Expected 11 tools, got {len(tools)}: {list(tools.keys())}"
+        assert len(tools) == 9, f"Expected 9 tools, got {len(tools)}: {list(tools.keys())}"
 
     def test_registers_prompt(self):
         srv = server_mod._create_server()
@@ -386,7 +357,7 @@ class TestCreateServer:
         try:
             srv = server_mod._create_server()
             tools = srv._tool_manager._tools
-            assert len(tools) == 11
+            assert len(tools) == 9
         finally:
             server_mod.memory = original
 
